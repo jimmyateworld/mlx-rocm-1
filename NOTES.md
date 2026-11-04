@@ -103,4 +103,47 @@ Sub-lever (b): draft-head quality probe (no retraining where possible).
 
 ## 4. GPU results
 
-(filled at measurement time)
+### Smoke (64-token, one run per arm, venv-p3, SCLK locked 2200, all rc=0)
+
+| arm | MODE | HEAD | tok/s | TOK/STEP | D1% | D2% | REF | CDEF | TAPE_CALLS |
+|---|---|---|---|---|---|---|---|---|---|
+| S_B4  | 4 | 4bit | 43.98 | 2.844 | 93.8 | 96.7 | 32 | 0 | 1536 |
+| S_B4HF| 4 | bf16full | 29.52 | 2.844 | 93.8 | 96.7 | 32 | 0 | 1536 |
+| S_T3T1| 3 | 4bit | 54.63 | 2.844 | 93.8 | 96.7 | 3 | 0 | 840 |
+| S_T3T0| 3 | 4bit | (legacy save/restore path) | | | | | | |
+| S_T3R5| 3 | 4bit (r5) | 33.47 | 2.000 | 68.8 | 45.5 | 0 | 22 | 768 |
+| S_T3HF| 3 | bf16full | 36.15 | 2.844 | 93.8 | 96.7 | 3 | 0 | 840 |
+| S_T3PH| 3 | postnorm | 54.28 | 2.812 | 93.8 | 93.3 | 4 | 0 | 864 |
+
+Smoke reading (64-token, 32 verifies - small sample, full 322-token battery is
+authoritative): T=3 tape works (tape calls + commit + rebind all live; r5
+deferred correction live, REFWDS=0). The S=3 tape arm beats S=4 tape on
+tok/s (54.6 vs 43.9) at equal acceptance in this sample. The r5 arm shows
+lower acceptance (2.0 tok/step, D1 68.8/D2 45.5) in this small sample. bf16full
+and postnorm arms run clean (INFO lines report HEAD/HEAD_H).
+
+### Full battery (anchor MTP_MAX_TOKENS=322, 3 rounds x 7 arms, medians; all rc=0 except T3T0 = clean-error control)
+
+| arm | head | tok/s | tok/step | D2% | REF | CDEF |
+|---|---|---|---|---|---|---|
+| B4 | 4-bit | 42.94 | 2.826 | 84.9 | 161 | 0 |
+| B4HF | bf16full | 30.77 | 2.826 | 84.9 | 161 | 0 |
+| B4PH | postnorm | 49.25 | 2.882 | 90.6 | 161 | 0 |
+| T3T1 (NEW) | 4-bit | 82.10 | 2.882 | 90.6 | 17 | 0 |
+| T3T0 | legacy | N/A (clean error) | | | | |
+| T3HF | bf16full | 44.79 | 2.882 | 90.6 | 17 | 0 |
+| T3PH | postnorm | 83.80 | 2.907 | 93.1 | 13 | 0 |
+
+Headline: S=3 tape = 1.91x S=4 tape (82.10 vs 42.94 tok/s); D3 never accepted
+(D3ACC=0 in every S=4 run) so S=3 is strictly better on this model. bf16full
+head: identical acceptance, ~1.8x slower draft. postnorm head: +2.5..5.7pts D2
+for free. Details + probe-only findings in REPORT.md.
+
+### Findings carried to REPORT.md
+
+1. The r4v-line wheels have NO int2 draft head (no op, no binding):
+   `hasattr(mx.fast, "lm_head_int2") == False` in venv-r4v; the r4v wheel's
+   libmlx carries no lm_head_int2 symbol. "int2" bench arms silently degraded
+   to the model 4-bit head in every r4v-line round.
+2. venv protocol note: the venvs need `LD_LIBRARY_PATH=<venv>/lib/python3.14/
+   site-packages/mlx/lib` to import mlx (added to the p3 battery BASEENV).
