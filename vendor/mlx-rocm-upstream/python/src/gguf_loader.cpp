@@ -15,6 +15,7 @@
 
 namespace mx = mlx::core;
 namespace nb = nanobind;
+using namespace nanobind::literals;  // arg-name literal operator""_a (nanobind 3.0.1, nb_attr.h)
 
 void init_gguf_loader(nb::module_& m) {
   auto sub = m.def_submodule(
