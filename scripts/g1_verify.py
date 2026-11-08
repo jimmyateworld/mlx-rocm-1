@@ -227,11 +227,13 @@ def gate_h(gl, path, pinned):
         )
         if not ok:
             die("H", f"cross-check mismatch for {name}")
-    # extra records: parsed records whose (name, offset) is not in the pinned set
+    # extra records: parsed records that the pinned table cannot account for
+    # (name absent from the pinned set, or same name with a different offset;
+    # this file: 442 records, all unique names, 2 names not in the pinned 440)
     extras = [
         (r["name"], r["offset"], r["size"])
         for r in h["records"]
-        if r["name"] in pin and r["offset"] != pin[r["name"]]["offset"]
+        if r["name"] not in pin or r["offset"] != pin[r["name"]]["offset"]
     ]
     if len(extras) != 2:
         die("H", f"expected 2 extra records, got {extras}")
