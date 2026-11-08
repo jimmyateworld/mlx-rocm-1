@@ -71,7 +71,7 @@ def file_map_pattern(W, axis, groups=32, keep_ends=1, pairs=15):
     `W` is a block view: (n, groups, 128, ...) for axis 1 and
     (groups, 128, ...) for axis 0.
     """
-    B = W.reshape(W.shape[0], groups, 128, -1) if axis == 1 else W.reshape(groups, 128, W.shape[1] // 128, 128, -1)
+    B = W.reshape(W.shape[0], groups, 128, -1) if axis == 1 else W.reshape(W.shape[0], 128, W.shape[2], 128, -1)
     out = np.empty_like(B)
     for f in range(groups):
         if f < keep_ends or f >= groups - keep_ends:
@@ -116,14 +116,14 @@ def gate_s(gl):
         die("S", "u8 packed round-trip not bit-exact")
 
     # layout identity
-    raw2 = rng.integers(0, 256, 4096 * 4096 // 256 * bb, dtype=np.uint8)
+    raw2 = rng.integers(0, 256, 4096 * 4096 // 128 * bb, dtype=np.uint8)
     out = gl.apply_layout(raw2.tobytes(), [4096, 4096], bb, "identity", 0, 32, 1, 15)
     if bytes(out) != raw2.tobytes():
         die("S", "layout identity not a copy")
 
     # mid_transpose exact recovery vs the independent numpy reference
     for axis in (0, 1):
-        W = rng.integers(0, 256, 4096 * 4096 // 256 * bb, dtype=np.uint8)
+        W = rng.integers(0, 256, 4096 * 4096 // 128 * bb, dtype=np.uint8)
         B = (  # rows, blocks, 128 elems, block bytes
             W.reshape(4096, 32, 128, bb)
             if axis == 1
