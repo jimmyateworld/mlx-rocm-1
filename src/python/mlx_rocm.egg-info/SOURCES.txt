@@ -22,6 +22,7 @@ tests/test_qmv_mr2_lx_instantiation.py
 vendor/mlx-rocm-upstream/CMakeLists.upstream.txt
 vendor/mlx-rocm-upstream/LICENSE.upstream
 vendor/mlx-rocm-upstream/README.md
+vendor/mlx-rocm-upstream/REPORT.md
 vendor/mlx-rocm-upstream/ci/build_rocm.yml
 vendor/mlx-rocm-upstream/mlx/CMakeLists.txt
 vendor/mlx-rocm-upstream/mlx/allocator.h
@@ -50,6 +51,8 @@ vendor/mlx-rocm-upstream/mlx/fast_primitives.h
 vendor/mlx-rocm-upstream/mlx/fence.h
 vendor/mlx-rocm-upstream/mlx/fft.cpp
 vendor/mlx-rocm-upstream/mlx/fft.h
+vendor/mlx-rocm-upstream/mlx/gguf_loader.cpp
+vendor/mlx-rocm-upstream/mlx/gguf_loader.h
 vendor/mlx-rocm-upstream/mlx/graph_utils.cpp
 vendor/mlx-rocm-upstream/mlx/graph_utils.h
 vendor/mlx-rocm-upstream/mlx/io.h
@@ -757,3 +760,6 @@ vendor/mlx-rocm-upstream/mlx/types/complex.h
 vendor/mlx-rocm-upstream/mlx/types/fp16.h
 vendor/mlx-rocm-upstream/mlx/types/half_types.h
 vendor/mlx-rocm-upstream/mlx/types/limits.h
+vendor/mlx-rocm-upstream/python/src/CMakeLists.txt
+vendor/mlx-rocm-upstream/python/src/gguf_loader.cpp
+vendor/mlx-rocm-upstream/python/src/mlx.cpp

@@ -385,15 +385,20 @@ std::vector<uint8_t> gguf_apply_layout(
     uint64_t b0 = (w * static_cast<uint64_t>(group) +
                    static_cast<uint64_t>(q));
     if (dims.size() == 1) {
-      std::memcpy(slab.data(), base_ + b0 * 128 * block_bytes, slab.size());
+      // 1D: one 128-element block per slot; the packed buffer is
+      // [d0/128] blocks of block_bytes (axis-0 convention).
+      std::memcpy(slab.data(), base_ + b0 * block_bytes, block_bytes);
       return;
     }
     if (axis == 1) {
-      // rows c*128..(c+1)*128, slot b0: contiguous.
-      std::memcpy(
-          slab.data(),
-          base_ + (c * 128 * ns + b0) * 128 * block_bytes,
-          slab.size());
+      // rows c*128..(c+1)*128, slot b0: 128 strided blocks in the packed
+      // [d0 element row][d1 block slot] layout (axis-0 convention).
+      for (uint64_t i = 0; i < 128; ++i) {
+        std::memcpy(
+            slab.data() + i * block_bytes,
+            base_ + ((c * 128 + i) * ns + b0) * block_bytes,
+            block_bytes);
+      }
     } else {
       // rows b0*128..(b0+1)*128, column chunk c: 128 strided blocks.
       for (uint64_t i = 0; i < 128; ++i) {
@@ -414,14 +419,17 @@ std::vector<uint8_t> gguf_apply_layout(
     uint64_t b0 = (w * static_cast<uint64_t>(group) +
                    static_cast<uint64_t>(q));
     if (dims.size() == 1) {
-      std::memcpy(base_ + b0 * 128 * block_bytes, from, 128 * block_bytes);
+      std::memcpy(base_ + b0 * block_bytes, from, block_bytes);
       return;
     }
     if (axis == 1) {
-      std::memcpy(
-          base_ + (c * 128 * ns + b0) * 128 * block_bytes,
-          from,
-          128 * block_bytes);
+      // strided per-block, same convention as the axis-0 path below.
+      for (uint64_t i = 0; i < 128; ++i) {
+        std::memcpy(
+            base_ + ((c * 128 + i) * ns + b0) * block_bytes,
+            from + i * block_bytes,
+            block_bytes);
+      }
     } else {
       for (uint64_t i = 0; i < 128; ++i) {
         std::memcpy(
