@@ -203,7 +203,7 @@ def gate_s(gl):
 
 def gate_h(gl, path, pinned):
     h = gl.parse_gguf_header(path, [0, 1, 8, 12, 13, 14], QUANT_BLOCK_BYTES, FLOAT_ELEM_BYTES)
-    if h["magic"] != 0x46464747 or h["version"] != 3:
+    if h["magic"] != 0x46554747 or h["version"] != 3:
         die("H", f"bad magic/version: {h['magic']:#x} / {h['version']}")
     if h["n_tensors_declared"] != 442:
         die("H", f"n_tensors_declared {h['n_tensors_declared']} != 442")

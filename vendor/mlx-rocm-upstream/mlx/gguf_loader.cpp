@@ -129,7 +129,7 @@ GgufHeader parse_gguf_header(
   h.version = read_u32(base + 4);
   h.n_tensors_declared = read_u64(base + 8);
   h.n_kv = read_u64(base + 16);
-  if (h.magic != 0x46464747) {  // "GGUF"
+  if (h.magic != 0x46554747) {  // "GGUF" (bytes 47 47 55 46, little-endian u32)
     throw std::runtime_error("gguf_loader: bad magic 0x" +
         std::to_string(h.magic));
   }
