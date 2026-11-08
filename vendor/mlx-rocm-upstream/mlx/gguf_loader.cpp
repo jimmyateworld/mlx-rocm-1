@@ -2,7 +2,10 @@
 #include "mlx/gguf_loader.h"
 
 #include <algorithm>
+#include <cstring>
+#include <fcntl.h>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <system_error>
@@ -134,7 +137,8 @@ GgufHeader parse_gguf_header(
   int64_t pos = 24;
   h.alignment = 30;  // spec default
 
-  auto skip_value = [&](int64_t p, int t) -> int64_t {
+    std::function<int64_t(int64_t, int)> skip_value =
+      [&](int64_t p, int t) -> int64_t {
     if (t == 8) {  // STRING: u64 length + bytes
       uint64_t n = read_u64(base + p);
       if (p + 8 + static_cast<int64_t>(n) > static_cast<int64_t>(file.size)) {
@@ -293,27 +297,27 @@ std::vector<uint8_t> read_gguf_tensor(
 
 namespace {
 
-mx::Dtype dtype_from_string(const std::string& s) {
+Dtype dtype_from_string(const std::string& s) {
   if (s == "f32") {
-    return mx::float32;
+    return float32;
   }
   if (s == "f16") {
-    return mx::float16;
+    return float16;
   }
   if (s == "u8") {
-    return mx::uint8;
+    return uint8;
   }
   throw std::invalid_argument("gguf_loader: unknown dtype " + s);
 }
 
 }  // namespace
 
-mx::array gguf_bytes_to_array(
+array gguf_bytes_to_array(
     std::vector<uint8_t> bytes,
     const std::string& dtype,
     const std::vector<uint64_t>& shape) {
-  mx::Dtype dt = dtype_from_string(dtype);
-  size_t elem_bytes = dt == mx::uint8 ? 1 : (dt == mx::float16 ? 2 : 4);
+  Dtype dt = dtype_from_string(dtype);
+  size_t elem_bytes = dt == uint8 ? 1 : (dt == float16 ? 2 : 4);
   size_t need = elem_bytes;
   for (uint64_t d : shape) {
     need *= d;
@@ -324,7 +328,11 @@ mx::array gguf_bytes_to_array(
         " does not match the shape (needs " + std::to_string(need) + ")");
   }
   auto sp = std::make_shared<std::vector<uint8_t>>(std::move(bytes));
-  return mx::array(sp->data(), shape, dt, [sp](void*) {});
+  Shape shp;
+  for (uint64_t d : shape) {
+    shp.push_back(static_cast<int32_t>(d));
+  }
+  return array(sp->data(), std::move(shp), dt, [sp](void*) {});
 }
 
 std::vector<uint8_t> gguf_apply_layout(
@@ -442,7 +450,7 @@ std::vector<uint8_t> gguf_apply_layout(
   return out;
 }
 
-mx::array gguf_load_tensor(
+array gguf_load_tensor(
     const std::string& path,
     uint64_t data_start,
     uint64_t offset,

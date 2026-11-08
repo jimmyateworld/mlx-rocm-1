@@ -76,7 +76,7 @@ std::vector<uint8_t> read_gguf_tensor(
 // Build an mx::array from raw bytes with a bit-exact copy (no reordering,
 // no conversion): dtype "f32" (4 B/element), "f16" (2 B/element, bits kept
 // as float16), or "u8" (shape is the packed [n_blocks, block_bytes] view).
-mx::array gguf_bytes_to_array(
+array gguf_bytes_to_array(
     std::vector<uint8_t> bytes,
     const std::string& dtype,
     const std::vector<uint64_t>& shape);
@@ -105,7 +105,7 @@ std::vector<uint8_t> gguf_apply_layout(
     int pairs);
 
 // Combined: read + layout + array (one call, one mmap).
-mx::array gguf_load_tensor(
+array gguf_load_tensor(
     const std::string& path,
     uint64_t data_start,
     uint64_t offset,
