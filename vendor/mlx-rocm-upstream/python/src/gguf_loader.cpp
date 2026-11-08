@@ -81,10 +81,10 @@ float_elem_bytes: type code -> bytes per element.
       [](const std::string& path,
          uint64_t data_start,
          uint64_t offset,
-         uint64_t size) -> std::string {
+         uint64_t size) {
         std::vector<uint8_t> v =
             mx::read_gguf_tensor(path, data_start, offset, size);
-        return std::string(v.begin(), v.end());
+        return nb::bytes(reinterpret_cast<const char*>(v.data()), v.size());
       },
       "path"_a,
       "data_start"_a,
@@ -123,7 +123,7 @@ dtype "f32" (4 B/element), "f16" (2 B/element, bits kept as float16) or
          int axis,
          int group,
          int keep_ends,
-         int pairs) -> std::string {
+         int pairs) {
         std::vector<uint8_t> v(raw.size());
         std::copy(reinterpret_cast<const uint8_t*>(raw.data()),
                   reinterpret_cast<const uint8_t*>(raw.data()) + raw.size(),
@@ -137,7 +137,7 @@ dtype "f32" (4 B/element), "f16" (2 B/element, bits kept as float16) or
             group,
             keep_ends,
             pairs);
-        return std::string(out.begin(), out.end());
+        return nb::bytes(reinterpret_cast<const char*>(out.data()), out.size());
       },
       "raw"_a,
       "dims"_a,

@@ -296,6 +296,7 @@ def dequant_gguf(gguf_mod, raw, rec, qtypes):
 def gate_l(gguf_mod, gl, path, h, pinned, spec, ours_path):
     data_start = h["data_start"]
     qtypes = {
+        "Q2_K": gguf_mod.constants.GGMLQuantizationType(8),
         "Q4_K": gguf_mod.constants.GGMLQuantizationType(12),
         "Q5_K": gguf_mod.constants.GGMLQuantizationType(13),
         "Q6_K": gguf_mod.constants.GGMLQuantizationType(14),
@@ -329,8 +330,8 @@ def gate_l(gguf_mod, gl, path, h, pinned, spec, ours_path):
         n_ok += 1
     log(
         f"L  PASS  permutation-consistency multisets (row/col/block) on all "
-        f"{n_ok} quant tensors (Q2_K dequant n/a; its layout is identity, "
-        f"consistency trivial)"
+        f"{n_ok} quant tensors (Q2_K included via the gguf q2_k dequant; "
+        f"its layout is identity, so consistency is trivial)"
     )
 
     # ---- D2-method anchor re-derivation at layers 0 and 12 ----
