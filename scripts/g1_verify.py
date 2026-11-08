@@ -186,7 +186,7 @@ def gate_s(gl):
             die("S", f"mid_transpose axis {axis} did not restore the engine layout")
     # mid_transpose 1D: the packed 1D buffer is [d0/128] blocks of bb; the
     # host 1D path is a per-slot block copy (the item-2 1D fix under test).
-    W1 = rng.integers(0, 256, 32 * bb, dtype=np.uint8)  # 4096 elems / 128 = 32 blocks
+    W1 = rng.integers(0, 256, (32, bb), dtype=np.uint8)  # 4096 elems / 128 = 32 blocks, (n_blocks, bb)
     Wf1 = np.ascontiguousarray(file_map_pattern_1d(W1))
     out1 = gl.apply_layout(Wf1.tobytes(), [4096], bb, "mid_transpose", 0, 32, 1, 15)
     if not np.array_equal(np.frombuffer(out1, dtype=np.uint8).reshape(32, bb), W1):
