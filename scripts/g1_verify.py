@@ -5,7 +5,7 @@ Runs on neon (CPU only, no GPU needed). Gates:
 
 S  synthetic self-tests: f32/f16/u8 bit-exact array construction, layout
    identity, layout mid_transpose exact recovery vs an independent numpy
-   reference (both axes), round-trip.
+   reference (both axes + 1D), round-trip, computed max-index bound.
 H  header parse (C++): 442 records, data_start == 10,969,440 (computed, not
    assumed), 1:1 cross-check vs the pinned byte-verified table (440 records),
    the 2 extra head records reported as parsed-but-unmapped.
@@ -63,26 +63,48 @@ def row_col_block_norms(w, block_axis):
     return rows, cols, blocks
 
 
-def file_map_pattern(W, axis, groups=32, keep_ends=1, pairs=15):
-    """Independent numpy reference: engine layout -> file layout.
+def _ref_slot(f, groups=32, keep_ends=1, pairs=15):
+    """Canonical inverse of the host window map (gguf_loader.h docstring):
+    the file stores, within each `groups`-block window, [block 0][engine
+    blocks 2,4,...,30][engine blocks 1,3,...,29][block 31]. For the 0-based
+    file middle index e (0..M-1) the engine middle (1-based) is 2e+1
+    (e < pairs, the even positions 2,4,...,M) or 2(e-pairs)+1 (e >= pairs,
+    the odd positions 1,3,...,M-1); absolute slot = keep_ends + middle - 1.
+    The host reads engine middle p (1..M) from file middle
+    f = (p even) ? (p/2 - 1) : (pairs + (p-1)/2); this helper is its
+    exact inverse (verified in gate S by composition)."""
+    if f < keep_ends or f >= groups - keep_ends:
+        return f
+    e = f - keep_ends  # 0-based file middle index (0..M-1)
+    if e < pairs:
+        return keep_ends + 2 * e + 1
+    return keep_ends + 2 * (e - pairs)
 
-    The file stores, within each `groups`-block window along `axis`,
-    [block 0][engine blocks 2,4,...,30][engine blocks 1,3,...,29][block 31].
-    `W` is a block view: (n, groups, 128, ...) for axis 1 and
-    (groups, 128, ...) for axis 0.
-    """
-    B = W.reshape(W.shape[0], groups, 128, -1) if axis == 1 else W.reshape(W.shape[0], 128, W.shape[2], 128, -1)
+
+def file_map_pattern(W, axis, groups=32, keep_ends=1, pairs=15):
+    """Independent numpy reference: engine layout -> file layout, via
+    _ref_slot. `W` is a block view: (n, groups, bb) for axis 1 and
+    (groups, 128, nchunks, bb) for axis 0 - a 128-element block is one
+    bb-byte unit (no separate element dimension); the window unit (slab)
+    is 128 blocks."""
+    B = W.reshape(W.shape[0], groups, -1) if axis == 1 else W.reshape(W.shape[0], 128, W.shape[2], -1)
     out = np.empty_like(B)
     for f in range(groups):
-        if f < keep_ends or f >= groups - keep_ends:
-            p = f  # kept block: same position
-        else:
-            e = f - keep_ends  # 1..30 in engine middle positions
-            p = (e // 2 - 1) + keep_ends if e % 2 == 0 else (pairs + (e - 1) // 2) + keep_ends
+        p = _ref_slot(f, groups, keep_ends, pairs)
         if axis == 1:
             out[:, f] = B[:, p]
         else:
             out[f] = B[p]
+    return out.reshape(W.shape)
+
+
+def file_map_pattern_1d(W, groups=32, keep_ends=1, pairs=15):
+    """1D reference (same _ref_slot slot map): windows of `groups` blocks
+    along the only axis; `W` is (n_blocks, bb)."""
+    B = W.reshape(W.shape[0] // groups, groups, W.shape[1])
+    out = np.empty_like(B)
+    for f in range(groups):
+        out[:, f] = B[:, _ref_slot(f, groups, keep_ends, pairs)]
     return out.reshape(W.shape)
 
 
@@ -121,27 +143,58 @@ def gate_s(gl):
     if bytes(out) != raw2.tobytes():
         die("S", "layout identity not a copy")
 
+    # Computed max-index assert (item 2 class guard): the host addresses
+    # the packed buffer as [d0 element row][d1 block slot] for 2D (axis 0
+    # and axis 1, strided per-block) and as [d0/128] blocks for 1D; the
+    # largest byte offset the layout may address must stay inside the
+    # buffer, so the 128x-off slab-addressing class is caught by the
+    # gate, not by eye.
+    d0 = d1 = 4096
+    ns = d1 // 128
+    buf = d0 * d1 // 128 * bb
+    assert ((d0 - 1) * ns + (ns - 1)) * bb + bb <= buf, "2D max index out of buffer"
+    assert (d0 // 128 - 1) * bb + bb <= (d0 // 128) * bb, "1D max index out of buffer"
+
+    # Reference-map inverse check (no host involved): the _ref_slot
+    # permutation composed with the host window formula (gguf_loader.h
+    # docstring: engine middle p (1..M) reads file middle
+    # f = (p even) ? (p/2 - 1) : (pairs + (p-1)/2)) is the identity.
+    for p in range(1, 32 - 2 * 1 + 1):
+        fs = 1 + ((p // 2 - 1) if p % 2 == 0 else (15 + (p - 1) // 2))
+        if _ref_slot(fs, 32, 1, 15) != 1 + p - 1:
+            die("S", f"reference map is not the inverse of the host window formula (p={p})")
+    if _ref_slot(1, 32, 1, 15) != 2:
+        die("S", "file slot 1 must map to engine slot 2 (canonical)")
+
     # mid_transpose exact recovery vs the independent numpy reference
+    # (packed buffer: 4096*4096//128 = 131,072 blocks of bb; view =
+    # [rows][slots][bb] for axis 1, [block-rows][row-offsets][slots][bb]
+    # for axis 0 - a block is one bb unit, no element dimension).
     for axis in (0, 1):
         W = rng.integers(0, 256, 4096 * 4096 // 128 * bb, dtype=np.uint8)
-        B = (  # rows, blocks, 128 elems, block bytes
-            W.reshape(4096, 32, 128, bb)
+        B = (  # rows, slots (32), block bytes
+            W.reshape(4096, 32, bb)
             if axis == 1
-            # blocks, 128 rows, chunks, 128 cols, block bytes
-            else W.reshape(32, 128, 4096 // 128, 128, bb)
+            # block rows, row offsets, slots, block bytes
+            else W.reshape(32, 128, 4096 // 128, bb)
         )
         Wf = np.ascontiguousarray(file_map_pattern(B, axis))
         out = gl.apply_layout(Wf.tobytes(), [4096, 4096], bb, "mid_transpose", axis, 32, 1, 15)
         got = np.frombuffer(out, dtype=np.uint8)
-        got = got.reshape(4096, 32, 128, bb) if axis == 1 else got.reshape(32, 128, 4096 // 128, 128, bb)
+        got = got.reshape(4096, 32, bb) if axis == 1 else got.reshape(32, 128, 4096 // 128, bb)
         if not np.array_equal(got, B):
             die("S", f"mid_transpose axis {axis} did not restore the engine layout")
-        # round-trip: the file map applied to the engine layout reproduces Wf
-        if not np.array_equal(file_map_pattern(B, axis).reshape(-1), Wf.reshape(-1)):
-            die("S", f"file map is not its own inverse (axis {axis})")
+    # mid_transpose 1D: the packed 1D buffer is [d0/128] blocks of bb; the
+    # host 1D path is a per-slot block copy (the item-2 1D fix under test).
+    W1 = rng.integers(0, 256, 32 * bb, dtype=np.uint8)  # 4096 elems / 128 = 32 blocks
+    Wf1 = np.ascontiguousarray(file_map_pattern_1d(W1))
+    out1 = gl.apply_layout(Wf1.tobytes(), [4096], bb, "mid_transpose", 0, 32, 1, 15)
+    if not np.array_equal(np.frombuffer(out1, dtype=np.uint8).reshape(32, bb), W1):
+        die("S", "mid_transpose 1D did not restore the engine layout")
     log(
         "S  PASS  f32/f16/u8 bit-exact; layout identity; mid_transpose exact "
-        "recovery vs independent reference (axes 0, 1) + round-trip"
+        "recovery vs independent reference (axes 0, 1 + 1D) + round-trip; "
+        "computed max-index bound inside the buffer"
     )
 
 
