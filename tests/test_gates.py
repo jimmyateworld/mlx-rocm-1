@@ -17,7 +17,7 @@ def _vendor() -> dict:
 
 def test_vendor_pin_is_well_formed():
     v = _vendor()
-    for key in ("primary",):
+    for key in ("primary", "fallback"):
         assert v[key]["fork"].startswith("https://github.com/")
         assert v[key]["ref"]
     assert v["build"]["hip_architectures"] == "gfx1201"
@@ -49,7 +49,7 @@ def test_ci_wiring_present():
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
     assert 'pytest -m "not gpu"' in ci
     assert "size_ratchet.py" in ci
-    assert "self-hosted" not in ci  # hermetic CI: no GPU, no guest-a assumptions
+    assert "self-hosted" not in ci  # hermetic CI: no GPU, no neon assumptions
 
 
 def test_gpu_tests_are_marked():

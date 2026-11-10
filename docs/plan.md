@@ -5,16 +5,16 @@ determine the minimum work to create an equivalent ROCm backend (`mlx-rocm`). No
 the host, so this is source-reading + web.
 
 **End use:** run the fleet's qMLX inference stack (qmlx-serve, Qwen3.x serving, MTP spec
-decode, prefix/disk KV cache, mlx-lm) on **guest-a** — AMD RX 9070 XT + Ryzen 9700X,
+decode, prefix/disk KV cache, mlx-lm) on **marzuki-neon** — AMD RX 9070 XT + Ryzen 9700X,
 ROCm 10.1 (verified guest toolchain; 7.7 was the original target).
 
 **ROCm version note (2026-10-26, supersedes the 6.4/7.7 references below):** the verified
-guest toolchain on guest-a is **ROCm 10.1** (core at `/opt/rocm/core-10.1`,
+guest toolchain on marzuki-neon is **ROCm 10.1** (core at `/opt/rocm/core-10.1`,
 `CMAKE_PREFIX_PATH=/opt/rocm/core-10.1`, `amdrocm-*-dev10.1` packages; see
 docs/quickstart.md). Nothing else is verified: 6.4 was the early probe validation and
 7.7 the original target. Where this report says "on ROCm 7.7" for the box, read 10.1.
 
-**Method:** read the upstream MLX (main @ `56c2bf9`, v0.32.5), the two named prior-art repos,
+**Method:** read `ml-explore/mlx` (main @ `56c2bf9`, v0.32.5), the two named prior-art repos,
 plus two additional MLX-ROCm forks discovered during the investigation (the single most
 important finding — see §3). Every architecture claim is cited to `file:line`.
 
@@ -22,20 +22,24 @@ important finding — see §3). Every architecture claim is cited to `file:line`
 
 ## TL;DR
 
-The single most important finding: **the work is already a complete, actively maintained ROCm backend (the ROCm base) — an open experiment in development since 2025-06-16 (last updated 2026-08-14, addressing the issue "Add ROCm
-Support for AMD GPUs"). It contains a complete `mlx/backend/rocm/` that mirrors
-the CUDA backend file-for-file. Two independent downstream projects already build and run on top of it (a C++ LLM engine on Strix Halo, and an Ollama fork on an RX 9060 XT).
+The single most important finding: **the work is ~90% done and already in an open upstream
+PR.** `ml-explore/mlx` PR **#2300 "[Experiment] ROCm backend"** (head
+`NripeshN/mlx:rocm-support`, open since 2025-06-16, last updated 2026-08-14, closes issue
+#2556 "Add ROCm Support for AMD GPUs") contains a complete `mlx/backend/rocm/` that mirrors
+the CUDA backend file-for-file. Two independent downstream projects already build and run on
+top of it (a C++ LLM engine on Strix Halo, and an Ollama fork on an RX 9060 XT).
 
 So "minimum work to create mlx-rocm" is **not** "port the CUDA backend from scratch." It is:
 
-1. **Adopt** the ROCm base tree (or the newer forward-merge of the vendor ref, which adds GatedDeltaNet + mxfp8 + gfx1200 fixes) as the base.
+1. **Adopt** the `NripeshN/mlx:rocm-support` tree (or the newer `maternion/mlx:rocm-current`
+   forward-merge, which adds GatedDeltaNet + mxfp8 + gfx1200 fixes) as the base.
 2. **Build** the `mlx` wheel with `-DMLX_BUILD_ROCM=ON -DCMAKE_HIP_ARCHITECTURES=gfx1201`.
 3. **Validate on gfx1201** (RX 9070 XT) — the fork is tested mostly on Strix Halo APUs
    (gfx1150/1151) and RX 9060 (gfx1200); gfx1201 has one known fp8 GEMM driver bug.
 4. **Smoke-test qmlx-serve** with a 9B-class dense Qwen3 (the "minimum" target).
 
 That is a **~2.5–5 person-week** effort for the minimum (9B dense on gfx1201). The full
-qMLX 9B hybrid stack (GatedDeltaNet, MoE, MTP, disk KV) is an additional ~2–4 person-weeks
+qMLX 122B hybrid stack (GatedDeltaNet, MoE, MTP, disk KV) is an additional ~2–4 person-weeks
 and is mostly "validate + fix known issues," not "write new kernels."
 
 A critical naming correction up front: **the RX 9070 XT is `gfx1201`, not `gfx110x`** (see §4).
@@ -44,7 +48,7 @@ A critical naming correction up front: **the RX 9070 XT is `gfx1201`, not `gfx11
 
 ## 1. mlx-cuda architecture (what we are mirroring)
 
-The CUDA backend lives at `mlx/backend/cuda/` in the upstream MLX @ `56c2bf9`. Its structure
+The CUDA backend lives at `mlx/backend/cuda/` in `ml-explore/mlx` @ `56c2bf9`. Its structure
 is the template the ROCm backend must match. Key abstractions:
 
 ### 1.1 Device / Worker / CommandEncoder (the CUDA-graph-capture model)
@@ -88,13 +92,13 @@ Ops that a backend has not implemented are marked with a `NO_GPU(Name)` macro th
 backend's `NO_GPU` set is: `LUF, QRF, SVD, Inverse, Eig, Eigh, GatedDeltaUpdate, Send, Recv`.
 
 **Important for the qMLX workload:** `GatedDeltaUpdate` (the DeltaNet / linear-attention
-primitive, ~75% of the layers in the Qwen3.5 GDN-hybrid 9B work model) is `NO_GPU` on CUDA. It works via a
+primitive, ~75% of the layers in Qwen3.5-122B-A10B) is `NO_GPU` on CUDA. It works via a
 **backend-agnostic per-timestep fallback** in `mlx/fast.cpp:1078-1204` — a `for t in range(T)`
 loop that decomposes the update into standard ops (multiply/sum/subtract/add/where/astype).
 The ROCm fork takes the same path (`rocm/primitives.cpp:59-72`, `use_fallback` always true).
 So GatedDeltaNet **runs on ROCm out of the box**, but as a per-timestep loop: fine for
 decode (T=1), slow for long prefill (T=4096 → ~32k small kernel launches). This is the main
-performance gap for the 9B hybrid model, not a correctness gap.
+performance gap for the 122B hybrid model, not a correctness gap.
 
 ### 1.4 Build system
 
@@ -130,7 +134,7 @@ custom `steel/` GEMM with raw `mma.sync` PTX.
 
 ## 2. CUDA → ROCm API map (for exactly what mlx-cuda uses)
 
-The ROCm base tree is the de-facto reference translation. It maps the CUDA
+The `NripeshN/mlx:rocm-support` tree is the de-facto reference translation. It maps the CUDA
 surface in §1.6 as follows. `rocm/CMakeLists.txt` finds: `hip`, `rocblas`, `rocthrust`,
 `rocprim`, `hiprand`, and (conditionally) `rocwmma`.
 
@@ -178,11 +182,12 @@ test hardest on the discrete RX 9070 XT.
 
 ## 3. Prior art
 
-### 3.1 THE one: the ROCm base (the de-facto open port)
+### 3.1 THE one: `ml-explore/mlx` PR #2300 (head `NripeshN/mlx:rocm-support`)
 
 This is the real, ongoing, upstream MLX→ROCm port. Facts:
 
-- **Open experiment** "[Experiment] ROCm backend," created **2025-06-16**, last updated **2026-08-14**, **addressing issue #2556** ("Add ROCm
+- **Open PR** `ml-explore/mlx#2300` "[Experiment] ROCm backend," created **2025-06-16**,
+  last updated **2026-08-14**, head `NripeshN:rocm-support`, **closes #2556** ("Add ROCm
   Support for AMD GPUs"). ~16 months of work.
 - **Complete `mlx/backend/rocm/`** mirroring the CUDA backend: `allocator`, `device`/
   `worker`/`CommandEncoder` (with HIP-graph capture + build-once decode replay), every
@@ -196,7 +201,8 @@ This is the real, ongoing, upstream MLX→ROCm port. Facts:
   `Rdna35` (gfx1150/1151/1152), `Rdna3` (gfx11xx), `Rdna2` (gfx10xx), `Cdna` (gfx9xx) from
   `hipDeviceProp::gcnArchName`, and tunes QMV/QMM crossover thresholds + a WMMA allowlist
   (`qmm.hip:620-631` includes gfx1200/gfx1201).
-- **Multiple contributors** (Geramy, goniz, lemonade-sdk, antmikinka, soloish90). PR history: #1 device info + gfx1151 (2026-02-03) → #5 "WMMA prefill, hipBLASLt, 4-bit MoE
+- **Multiple contributors** (Geramy, goniz, lemonade-sdk, antmikinka, soloish90, NripeshN).
+  PR history: #1 device info + gfx1151 (2026-02-03) → #5 "WMMA prefill, hipBLASLt, 4-bit MoE
   dispatch, QMV tuning, iGPU allocator" (2026-03-27) → #11 JIT INFINITY/NAN fix (2026-07-14)
   → #13 dual-load SEGV investigation (2026-07-19).
 - **CI** (`.github/workflows/build_rocm.yml`): builds the `mlx` wheel on a **self-hosted
@@ -205,7 +211,9 @@ This is the real, ongoing, upstream MLX→ROCm port. Facts:
 - **Known open issue** (`docs/rocm-investigation-2026-07-19/RESULTS.md`): **dual large-model
   process load → SIGSEGV** (exit 139) on a unified-memory APU (gfx1150) — a resource
   overcommit / ungraceful-OOM in the allocator/HIP, *not* a single-stream kernel bug.
-Exclusive single-process loads pass. **For guest-a (a single discrete GPU, single serving process) this is not the blocking case**, but it is the one to watch if you ever run two models.
+  Exclusive single-process loads pass. **For marzuki-neon (a single discrete GPU, single
+  serving process) this is not the blocking case**, but it is the one to watch if you ever
+  run two models.
 - **Packaging:** `setup.py` has no `[rocm]` extra yet — the wheel is just the standard `mlx`
   wheel built with `-DMLX_BUILD_ROCM=ON`. No separate `mlx-rocm` package, no bundled
   ROCm deps (the system ROCm install provides them). Simpler than the CUDA wheel model.
@@ -217,7 +225,7 @@ file-for-file CUDA mirror with per-arch tuning already in place.
 ### 3.2 `lemonade-sdk/lemon-mlx-engine` (a.k.a. `bogdan-d/bleeding-edge`)
 
 - A **pure-C++ LLM inference engine** (62 stars) that builds *on top of* the fork via
-  `FetchContent(the ROCm base)` — `lemon-mlx-engine/CMakeLists.txt`.
+  `FetchContent(NripeshN/mlx @ rocm-support)` — `lemon-mlx-engine/CMakeLists.txt`.
 - Provides per-model definitions (Qwen3, Qwen3.5, Qwen3-MoE, Qwen3-Next/GDN, MTP, VLMs) and
   the `chat`/`server`/`diagnose` binaries. The engine itself is **closed-source** (binary
   releases); the model defs + tests are in the repo.
@@ -228,12 +236,12 @@ file-for-file CUDA mirror with per-arch tuning already in place.
 - **Relevance:** proves the fork runs real LLM serving end-to-end (including GatedDeltaNet +
   MoE + MTP model defs) on ROCm, and gives a working reference for the model-side code.
 
-### 3.3 the Ollama ROCm-MLX fork
+### 3.3 `maternion/ollama-rocm-mlx`
 
 - An **Ollama fork**: GGUF (llama.cpp ROCm `rocm_v7_2`) + MLX (`*-mlx`, `rocm_v10`) in one
   `ollama serve`. **Tested on RX 9060 XT (gfx1200, RDNA4), ROCm 10.**
-- Uses a **forward-merged** copy of the fork: the vendor ref, branch `rocm-current`
-  (forward-merge of the ROCm base onto the MLX commit Ollama pins, `59d600b5`). **Actively
+- Uses a **forward-merged** copy of the fork: `maternion/mlx` branch `rocm-current`
+  (forward-merge of PR #2300 onto the MLX commit Ollama pins, `59d600b5`). **Actively
   maintained — last commit 2026-09-28** ("mxfp8 prefill GEMM, cooperative softmax,
   device_info keys"; "ROCm 10 gfx1200 fixes"; "add ROCm GatedDeltaUpdate fallback").
 - **hipRTC custom kernels:** routes `fast::cuda_kernel` to the ROCm backend so MLX's fused
@@ -246,7 +254,7 @@ file-for-file CUDA mirror with per-arch tuning already in place.
   template for a turnkey build/install.
 
 **Bottom line on prior art:** three independent groups have converged on the same base
-(the ROCm base) and all three run it on RDNA. The risk is not "can MLX run on
+(`NripeshN/mlx:rocm-support`) and all three run it on RDNA. The risk is not "can MLX run on
 ROCm" (demonstrated) — it is "does it run *well* on gfx1201 specifically, under the qMLX
 workload, on ROCm 10.1 (the verified guest toolchain)."
 
@@ -273,7 +281,7 @@ Per the official ROCm GPU spec table (ROCm 10.1.0) and the compatibility matrix:
 
 So: **`gfx110x` is the RDNA3 / RX 7000 series. The RX 9070 XT (RDNA4) is `gfx1201`.**
 Both prior-art repos agree (bleeding-edge: "gfx120X = rdna4"; the fork's CMake: "RDNA4:
-gfx1200, gfx1201"). **guest-a's target arch is `gfx1201`.** (If the box's
+gfx1200, gfx1201"). **marzuki-neon's target arch is `gfx1201`.** (If the box's
 `rocm_agent_enumerator`/`rocminfo` reports something else, trust the tool — but expect
 gfx1201.)
 
@@ -281,7 +289,7 @@ gfx1201.)
 
 - **RDNA4 (gfx1200/gfx1201) support landed in ROCm 6.4.0** (release notes: "Support for
   gfx1201"). It is carried through 7.x and 10.x. **ROCm 10.1 (the verified guest
-  toolchain on guest-a) supports gfx1201.**
+  toolchain on marzuki-neon) supports gfx1201.**
 - The fork's `CMakeLists.txt` arch list explicitly targets "ROCm 6.4.0 – 7.2.0 compatibility
   matrix" and includes gfx1200/gfx1201; the fork's CI runs TheRock 7.13 and the Ollama fork
   runs ROCm 10 — so gfx1201 is a first-class target across the 7.x line.
@@ -315,8 +323,8 @@ want the same wheel on a MI300 box.
 - **GitHub `mlx-rocm`:** **no repository, organization, or user by that exact name** (all
   404). The name is free.
 - **Closest existing names** (not collisions, but do not confuse them):
-  the Ollama ROCm-MLX fork, `bogdan-d/bleeding-edge` (halo-ai CORE),
-  the ROCm base + the vendor ref (the two forks). None is named `mlx-rocm`
+  `maternion/ollama-rocm-mlx` (the Ollama fork), `bogdan-d/bleeding-edge` (halo-ai CORE),
+  `NripeshN/mlx` + `maternion/mlx` (the forks). None is named `mlx-rocm`.
 
 **Verdict:** the name `mlx-rocm` is clean on both GitHub and PyPI (our own placeholder
 holds the PyPI slot). No renaming needed.
@@ -325,20 +333,19 @@ holds the PyPI slot). No renaming needed.
 
 ## 6. Minimum `mlx-rocm` definition (phased plan + effort)
 
-"Minimum" = **qmlx-serve runs a 9B-class dense Qwen3 on the build VM (RX 9070 XT / gfx1201,
-ROCm 10.1), correctly, at usable decode speed.** MTP, disk KV, and 27B+/9B-hybrid are
-"Minimum" = **qmlx-serve runs a 9B-class dense Qwen3 on guest-a (RX 9070 XT / gfx1201,
-ROCm 10.1), correctly, at usable decode speed.** MTP, disk KV, and 27B+/122B-hybrid are deferred to Phase 2.
+"Minimum" = **qmlx-serve runs a 9B-class dense Qwen3 on marzuki-neon (RX 9070 XT / gfx1201,
+ROCm 10.1), correctly, at usable decode speed.** MTP, disk KV, and 27B+/122B-hybrid are
+deferred to Phase 2.
 
 ### Phase 0 — Adopt + build + smoke (0.5–1 person-week)
 
-1. Base on the ROCm base (or the vendor ref — newer, adds
+1. Base on `NripeshN/mlx:rocm-support` (or `maternion/mlx:rocm-current` — newer, adds
    GatedDeltaNet + mxfp8 + gfx1200 fixes; prefer it if it builds clean on 10.1).
 2. Build the `mlx` wheel:
    `CMAKE_ARGS="-DMLX_BUILD_ROCM=ON -DCMAKE_HIP_ARCHITECTURES=gfx1201 -DBLA_VENDOR=OpenBLAS"`.
    (No `setup.py` change needed — the fork builds the standard `mlx` wheel; the ROCm system
    install provides hip/rocblas/rocprim/hiprand/hiprtc/hipblaslt/rocwmma.)
-3. On guest-a: `python -c "import mlx.core as mx; print(mx.rocm.is_available())"`,
+3. On marzuki-neon: `python -c "import mlx.core as mx; print(mx.rocm.is_available())"`,
    `mx.set_default_device(mx.gpu)`, then the fork's basic tests (matmul, softmax) and
    `mlx_lm.generate` on Qwen3-0.6B (bf16 + 8bit).
    **Exit criteria:** `is_available()==True`, matmul/softmax correct, 0.6B generates sane
@@ -366,7 +373,7 @@ ROCm 10.1), correctly, at usable decode speed.** MTP, disk KV, and 27B+/122B-hyb
 
 ### Phase 2 — Full qMLX stack (deferred; ~2–4 person-weeks)
 
-1. **GatedDeltaNet (9B hybrid):** works via the per-timestep fallback (Phase-0 code), but
+1. **GatedDeltaNet (122B hybrid):** works via the per-timestep fallback (Phase-0 code), but
    long prefill is slow. Option A: accept it (qMLX's disk-KV makes prefill rare). Option B:
    port the Ollama fork's **bit-exact GatedDelta hipRTC kernel** (it exists and is tested).
 2. **MoE (A10B / 27B+):** `GatherQMM` + `moe_swiglu_sorted` are already in the fork
@@ -385,13 +392,14 @@ ROCm 10.1), correctly, at usable decode speed.** MTP, disk KV, and 27B+/122B-hyb
 | Scope | Effort | Risk |
 |---|---|---|
 | **Minimum: 9B dense Qwen3 on gfx1201 (Phase 0+1)** | **2.5–5 person-weeks** | Low-medium. The backend exists; the risk is gfx1201-specific validation (fp8 GEMM, allocator, SDPA path) on ROCm 10.1. |
-| Full qMLX 9B hybrid + MTP + disk KV (Phase 2) | +2–4 person-weeks | Medium. GatedDelta prefill perf + the M3 stream-TLS fix are the real work. |
+| Full qMLX 122B hybrid + MTP + disk KV (Phase 2) | +2–4 person-weeks | Medium. GatedDelta prefill perf + the M3 stream-TLS fix are the real work. |
 | (For contrast) Porting the CUDA backend from scratch | ~15–25 person-weeks | What we are *not* doing. |
 
-### Open questions (for the operator)
+### Open questions (for Andryo)
 
-1. **Base choice:** the ROCm base (the open port head, TheRock 7.13-tested)
-vs the vendor ref (newer, ROCm 10 + gfx1200 fixes, GatedDeltaNet). Need to confirm which builds clean on **ROCm 10.1** specifically (the fork's CI is 7.13, Ollama is
+1. **Base choice:** `NripeshN/mlx:rocm-support` (the upstream PR head, TheRock 7.13-tested)
+   vs `maternion/mlx:rocm-current` (newer, ROCm 10 + gfx1200 fixes, GatedDeltaNet). Need to
+   confirm which builds clean on **ROCm 10.1** specifically (the fork's CI is 7.13, Ollama is
    10).
 2. **Wheel vs source:** ship a real `mlx-rocm` PyPI wheel (needs a `setup.py` `[rocm]` extra
    + a CI matrix), or build-from-source on the box (simpler, what the fork does today)?
@@ -404,13 +412,13 @@ vs the vendor ref (newer, ROCm 10 + gfx1200 fixes, GatedDeltaNet). Need to confi
 
 ## Appendix A — Key file:line index
 
-**Upstream MLX @ `56c2bf9` (v0.32.5):**
+**Upstream `ml-explore/mlx` @ `56c2bf9` (v0.32.5):**
 - `mlx/device.h:14` — `DeviceType {cpu, gpu}` (Metal & CUDA both `gpu`).
 - `mlx/backend/cuda/` — the CUDA backend (the template).
 - `mlx/backend/gpu/` — backend-agnostic shim (the integration seam).
 - `mlx/fast.cpp:1078-1204` — `gated_delta_update` + per-timestep fallback.
 
-**The ROCm base (the open port head):**
+**`NripeshN/mlx:rocm-support` (PR #2300 head):**
 - `mlx/backend/rocm/CMakeLists.txt:22-23` — arch list incl. gfx1200/gfx1201; warp policy.
 - `mlx/backend/rocm/device.h` — `CommandEncoder` (HIP-graph capture, `ExecSlot` pool,
   build-once decode replay); CLR#138 kernelParams-by-pointer note.
@@ -431,14 +439,14 @@ vs the vendor ref (newer, ROCm 10 + gfx1200 fixes, GatedDeltaNet). Need to confi
 - `.github/workflows/build_rocm.yml` — CI on `strix-halo`, wheel build + mlx_lm tests.
 - `docs/rocm-investigation-2026-07-19/RESULTS.md` — dual-load SEGV (M1).
 
-**The vendor ref (Ollama's forward-merge):**
+**`maternion/mlx:rocm-current` (Ollama's forward-merge):**
 - `mlx/backend/rocm/primitives.cpp:59-72` — `GatedDeltaUpdate::use_fallback` always true.
 - Last commit 2026-09-28 (mxfp8 prefill GEMM, cooperative softmax, gfx1200 fixes).
 
 **Prior-art repos:**
-- `lemonade-sdk/lemon-mlx-engine/CMakeLists.txt` — `FetchContent(the ROCm base)`.
+- `lemonade-sdk/lemon-mlx-engine/CMakeLists.txt` — `FetchContent(NripeshN/mlx @ rocm-support)`.
 - `bogdan-d/bleeding-edge` — Strix Halo gfx1151, 151 tok/s @ 0.6B, TheRock 7.13.
-- the Ollama ROCm-MLX fork — RX 9060 XT gfx1200, ROCm 10, fp8 GEMV 104 tok/s.
+- `maternion/ollama-rocm-mlx` — RX 9060 XT gfx1200, ROCm 10, fp8 GEMV 104 tok/s.
 
 **ROCm (web):**
 - ROCm 10.1.0 GPU spec table — RX 9070 XT = gfx1201 (RDNA4), 16 GB, 64 CU, wavefront 32/64.

@@ -1,7 +1,7 @@
 """mlx-rocm — ROCm backend for MLX (MVP).
 
-MVP skeleton: vendored mlx ROCm backend tree (the vendor ref,
-forward-merge of the ROCm base) + a minimal standalone hipBLASLt
+MVP skeleton: vendored mlx ROCm backend tree (maternion/mlx:rocm-current,
+forward-merge of ml-explore/mlx PR #2300) + a minimal standalone hipBLASLt
 GEMM layer (bf16 + fp8 e4m3) with a CPU reference for validation.
 """
 

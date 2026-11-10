@@ -1,180 +1,49 @@
-# mlx-rocm
+# vendored upstream: mlx ROCm backend (provenance)
 
-ROCm backend for [MLX](https://github.com/mlx-project/mlx) — **pre-alpha**
-(first public release 0.1.0).
+## Source
 
-Purpose: a ROCm backend for MLX on AMD RDNA4 — validated on the RX 9070 XT
-(**gfx1201** — *not* gfx110x) — targeting the 9B hybrid at high decode
-speed. MTP spec decode and KV management are part of the MLX core path;
-serving is out of scope for this repo.
+| | |
+|---|---|
+| **Repository** | the vendor ref (an mlx fork) |
+| **Branch** | `rocm-current` |
+| **Commit** | the vendor-ref pin (2026-09-28) |
+| **Last commit subject** | "rocm: mxfp8 prefill GEMM, cooperative softmax, device_info keys" |
+| **Lineage** | Forward-merge of the open ROCm-base experiment "[Experiment] ROCm backend" (commit `75915908dfe5028335d318b10340313744fd3a8d`, 2026-07-19) onto the MLX base the Ollama fork pins. Adds GatedDeltaUpdate fallback, mxfp8 prefill GEMM, gfx1200/RDNA4 fixes, hipRTC custom-kernel routing. |
+| **License** | MIT (see `LICENSE.upstream`, also `../LICENSE`) |
 
-Stage: **pre-alpha**. 0.1.0 is a public milestone of the current tree, not a
-stability promise — expect breaking changes. The **alpha cut is planned once
-decode reaches close to the card's ceiling** (9B-hybrid target: ~120 tok/s,
-byte-identical vs autoregressive).
+## What was vendored
 
-Verified toolchain: ROCm 10.1 userland on the validated guest (core at
-`/opt/rocm/core-10.1`; 6.4 was the early probe validation and 7.7 the original
-target — neither is the verified version).
+- `CMakeLists.upstream.txt` — the fork's top-level `CMakeLists.txt`
+  (carries the `MLX_BUILD_ROCM` option and the ROCm build wiring:
+  `CMAKE_HIP_ARCHITECTURES` handling, hip compiler discovery).
+- `mlx/` — the full `mlx/` source tree from the fork, most importantly:
+  - `mlx/backend/rocm/` — the complete ROCm backend mirroring
+    `mlx/backend/cuda/` file-for-file: allocator, device/worker/
+    CommandEncoder (HIP-graph capture + build-once decode replay + the
+    `ExecSlot` pool for the ROCm CLR kernelParams-by-pointer bug, clr#138),
+    all primitive ports, `quantized/` (WMMA QMM incl. the `Rdna4`
+    gfx1200/1201 tier + WMMA allowlist), `gemms/` (hipBLASLt + rocBLAS +
+    naive + GEMV, with the `GemmPrecision` capability table and the
+    gfx1201 fp8 GEMM bug note + `MLX_ROCM_GEMM_BF16` escape hatch),
+    flash attention (vector decode + WMMA fwd/bwd prefill), hipRTC JIT,
+    `host_stage` pinned-bounce host reads, custom P2P all-reduce
+    (no RCCL), `moe_swiglu`, per-arch tuning.
+  - `mlx/backend/gpu/` — the backend-agnostic GPU shim (the integration
+    seam: `MLX_USE_ROCM` selection in `gpu/primitives.cpp`).
+- `ci/build_rocm.yml` — the fork's CI (self-hosted Strix Halo runner,
+  `CMAKE_ARGS="-DMLX_BUILD_ROCM=ON -DMLX_ROCM_ARCHITECTURES=gfx1151"`).
 
-## What this is
+Not vendored: `python/` (Pybind11 bindings incl. the `mlx.core.rocm`
+module), `tests/`, `benchmarks/`, `.github` (except the ROCm workflow).
+They are in the upstream repo at the pinned commit; pull them in when the
+full-wheel build phase starts.
 
-Three pieces:
-
-1. **`vendor/mlx-rocm-upstream/`** — the vendored ROCm backend tree. The
-   ROCm base already carries a complete `mlx/backend/rocm/` mirroring the
-   CUDA backend file-for-file; we vendor the newer forward-merge of the
-   vendor ref (adds GatedDeltaUpdate fallback, mxfp8 prefill GEMM,
-   gfx1200/RDNA4 fixes). Provenance: `vendor/mlx-rocm-upstream/README.md`.
-2. **`src/cpp/mlx_rocm/gemm/`** — a minimal standalone hipBLASLt GEMM
-   (bf16 + fp8 e4m3, persistent handle + workspace, heuristic algo,
-   row-major layouts) plus a dependency-free CPU reference GEMM.
-   Modeled on the fork's `gemms/hipblaslt_gemm.cpp`.
-3. **`scripts/smoke.sh`** — builds the GEMM, runs a small GEMM on the
-   build host (host-a, CPU reference), then rsyncs the tree to
-   guest-a (`ssh operator@<tailnet-ip>`), builds it against local
-   ROCm, and runs the GPU GEMM + fp8 probe there (guest-a phase budgeted
-   ~120 s; failures are recorded, not fatal).
-
-## gfx1201 notes
-
-- **RX 9070 XT = `gfx1201`** (RDNA4). `gfx110x` is RDNA3 (RX 7000). The
-  fork's default arch list includes gfx1200/gfx1201; the RDNA4 tier gets
-  its own QMV/QMM crossover tuning and the WMMA dense-qmm allowlist.
-- **fp8 GEMM status on this box**: the smoke's
-  `mlx_rocm_gemm_fp8_probe()` (256³ e4m3 GEMM vs. host reference)
-**passes** on guest-a gfx1201 (max_rel_err 0.0057, 0/65536 bad) — the probe shows no driver bug. Upstream notes fp8 e4m3 activation GEMM
-  "may be kernel-buggy on some RDNA4 drivers — long-context prefill on
-  gfx1201 garbles" (run-386 evidence, a different workload than this
-  probe). Keep `MLX_ROCM_GEMM_BF16=1` as the safe default until real
-  prefill validation proves the driver clean for that workload. The
-  probe is part of the smoke run.
-- Discrete-GPU allocator hazards the fork engineered around (BAR read
-  ~54 MB/s vs hipMemcpy 50.4 GB/s → pinned `host_stage` bounce;
-  async-pool off by default) are inherited from the vendored tree.
-
-## Build
-
-Host-only (no ROCm needed — CPU reference path):
+## Build (upstream layout, for the full wheel)
 
 ```
-cmake -S . -B build && cmake --build build
-./build/gemm_smoke host
+CMAKE_ARGS="-DMLX_BUILD_ROCM=ON -DCMAKE_HIP_ARCHITECTURES=gfx1201 -DBLA_VENDOR=OpenBLAS" \
+  python setup.py bdist_wheel
 ```
 
-With ROCm (gfx1201 box, e.g. the guest-a guest — see `docs/quickstart.md`):
-
-```
-cmake -S . -B build -DMLX_ROCM_WITH_HIP=ON -DCMAKE_PREFIX_PATH=/opt/rocm/core-10.1 \
-  && cmake --build build
-./build/gemm_smoke hip        # bf16 512^3 + fp8 e4m3 probe
-```
-
-Full `mlx` wheel from the vendored tree (next phase):
-
-```
-CMAKE_ARGS="-DMLX_BUILD_ROCM=ON -DCMAKE_HIP_ARCHITECTURES=gfx1201 -DBLA_VENDOR=OpenBLAS -DCMAKE_PREFIX_PATH=/opt/rocm/core-10.1" \
-  python setup.py bdist_wheel   # from vendor/mlx-rocm-upstream layout
-```
-
-## Smoke
-
-```
-scripts/smoke.sh
-```
-
-Local: build + small host GEMM. Guest-a: `ssh` reachability + `rocm-smi`
-check, tar transfer, ROCm build, GPU GEMM + fp8 probe. Results land in
-`scripts/smoke-results/` (gitignored).
-
-## Supported models (gfx1201, ROCm 10.1 guest)
-
-| Model | Quant | Status on gfx1201 |
-|---|---|---|
-| Qwen3-0.6B | 8-bit (affine) | validated — benched 207.6–214.3 tok/s (`k2-non-gemm-fusion`) |
-| Qwen3-0.6B | bf16 | Phase 0 smoke target (`scripts/smoke.py` ladder) |
-| 9B-class dense Qwen3 | 4-bit (affine qmm) | validated — benched 55.9–57.8 tok/s A/B (`k2-non-gemm-fusion`), 63.8 tok/s with a 16-token warmup (`opt-gauntlet-areaA`) |
-| 9B hybrid (GDN + FA) | 4-bit (affine) | supported — the main workload; ~73 tok/s AR small-ctx on main, levers in flight toward ~120 |
-| 27B dense / MoE | — | not validated (a 27B load was in flight on the guest, unvalidated) |
-| MTP spec decode | 4-bit | K=2 supported, lossless (merged); slower than AR today — the active speed target |
-| non-gfx1201 archs | — | not validated (only gfx1201 is validated in this repo) |
-
-Details, in-flight items, and caveats: `docs/limitations.md`.
-
-## Converting a model
-
-`mlx_lm` (≥ 0.32) converts a HuggingFace ref to the safetensors layout the
-loader expects:
-
-```
-# bf16
-mlx_lm.convert --model Qwen/Qwen3-0.6B
-# 4-bit affine qmm (validated on gfx1201)
-mlx_lm.convert --model Qwen/Qwen3-8B --quantize --bits 4 --group-size 64
-# 8-bit (AWQ-style)
-mlx_lm.convert --model Qwen/Qwen3-8B --quantize --bits 8 --q-mode awq
-```
-
-Or use a pre-converted `mlx-community/*` ref (e.g.
-`mlx-community/Qwen3-0.6B-8bit`). **mxfp4 is the in-flight target (K4)**:
-prefill runs via the opt-in dequant→bf16 GEMM path today; there is no native
-mxfp4 kernel yet.
-
-## Status — lanes
-
-| Lane | What | Branch |
-|---|---|---|
-| K1 (QMV/GEMV bandwidth) | int8-activation QMV fix (N=12288); no bench yet | `k1-qmv-gemv-bandwidth` |
-| K2 (non-GEMM fusion) | merged (#2) | — |
-| K3 (GDN port) | merged (#3) | — |
-| K4 (MXFP4) | opt-in dequant→bf16 GEMM only; no native kernel, no dedicated branch yet | — |
-| G1 (graph decode) | pilot wiring + ROCm 10.1 `hipStreamIsCapturing` fix; symbol export / engine wiring pending | `g1-graph-decode` |
-| alpha (docs/housekeeping) | alpha-state checklist + this docs wave | `alpha-checklist` / `alpha-docs` |
-
-## Python package
-
-`pip install mlx-rocm` (`pyproject.toml`, `src/python/mlx_rocm/`): ctypes
-bindings to `libmlx_rocm.so` (host GEMM always; GPU GEMM + fp8 probe in ROCm
-builds) with a pure-numpy bf16 fallback. The published 0.1.0 wheel is this
-package; the full `mlx` wheel (the vendored tree with the ROCm backend,
-`scripts/build-wheel.sh`) is built and validated per workload — the 9B-class
-and 9B-hybrid serve paths are validated on the guest.
-
-## License
-
-MIT (MLX upstream license; see `LICENSE`).
-
-## Repo layout (scaffold)
-
-- `docs/plan.md` — the research report + phased plan (architecture, CUDA→ROCm map,
-  prior art, gfx1201 findings, effort).
-- `docs/limitations.md` — what works / in flight / not supported / caveats.
-- `docs/quickstart.md` — the verified build + smoke path on a gfx1201 box.
-- `PLAN.md` — living plan (phases, current state, open questions).
-- `vendor.json` — the pinned vendor fork + ref (primary/fallback) and the build flags.
-- `scripts/build-wheel.sh` — build the `mlx` wheel with `-DMLX_BUILD_ROCM=ON` for gfx1201 (runs on guest-a).
-- `scripts/smoke.py` — Phase 0 smoke: is_available, matmul/softmax numerics, 0.6B generate.
-- `scripts/smoke-serve.sh` — Phase 1 smoke: qmlx-serve with a 9B-class dense Qwen3.
-- `scripts/size_ratchet.py` + `size-ratchet.json` — deterministic size gate (CI).
-- `tests/` — hermetic tests (CI) + `@pytest.mark.gpu` tests (guest-a only).
-
-## Commands
-
-```bash
-uv sync
-uv run ruff format . && uv run ruff check .
-uv run pytest -m "not gpu"          # hermetic (CI)
-uv run python scripts/size_ratchet.py --base HEAD
-```
-
-GPU commands run on guest-a (see AGENTS.md).
-
-## Rules
-
-Branch + PR to main (protected: no direct pushes), CI green, adversarial review by a
-different agent than the submitter, peer merges `--squash`. See AGENTS.md.
-## Provenance
-
-Development took place on a private GitLab instance. This public
-repository carries the project from the v0.1.2 release onward; the
-earlier development history is not public.
+`gfx1201` = RX 9070 XT (RDNA4). **Not** `gfx110x` (that is RDNA3 / RX 7000).
+ROCm 6.4+ supports gfx1200/1201; guest-a runs ROCm 7.x (TheRock/Fedora stack).

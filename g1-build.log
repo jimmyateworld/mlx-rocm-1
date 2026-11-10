@@ -1,0 +1,18 @@
+Processing ./.
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Building wheels for collected packages: mlx
+  Building wheel for mlx (pyproject.toml): started
+  Building wheel for mlx (pyproject.toml): finished with status 'done'
+  Created wheel for mlx: filename=mlx-0.32.3.dev20261026+9ce3117-cp312-cp312-linux_x86_64.whl size=21509641 sha256=246acbeaca57f91365065dbf911b387005ae29a09ee5cd32d58556e712a10a2c
+  Stored in directory: /tmp/pip-ephem-wheel-cache-z5y63b9j/wheels/17/ed/a1/c9fcc5b4a66d0fb8e85a0230c4a1062420200e16dbd7e5d010
+Successfully built mlx
+=== [g1a-2 Mon Oct 26 10:41:23 UTC 2026] build-resume check ===
+[  0%] Built target cpu_compiled_preamble
+[  2%] Built target gguflib
+[  2%] Built target mlx_version
+[ 24%] Built target mlx_rocm_kernels_lib
+[ 31%] Built target nanobind-static
+[ 86%] Built target mlx
+[100%] Built target core
+=== exit: 0 ===

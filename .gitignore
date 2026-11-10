@@ -1,19 +1,88 @@
-.venv/
+# Byte-compiled / optimized / DLL files
 __pycache__/
-*.pyc
-.pytest_cache/
+*.py[cod]
+*$py.class
+
+# tensor files
+*.safe
+*.safetensors
+
+# Metal libraries
+*.metallib
+
+# Distribution / packaging
+/build/
+python/mlx/core
+python/mlx/share
+python/mlx/include
+.Python
+develop-eggs/
 dist/
-build/
-build-*/
-*.whl
-*.so
-*.o
-scripts/smoke-results/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+venv/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+uv.lock
 .DS_Store
 
-# vendor/ is NOT ignored: the vendored upstream tree is committed
-# (vendor/mlx-rocm-upstream/, provenance in vendor/mlx-rocm-upstream/README.md).
+# Prerequisites
+*.d
 
-# fleet session state (never commit; see issue #19)
-.fleetwork/
-salvage.tar
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+*.ilk
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Debug symbols
+*.pdb
+
+# VSCode
+.vscode/
+# Jetbrains
+.cache/
+# vim
+*.swp
+
+# keys
+*.pem
+
+build.sh
+github-runner/
+sync_fork.sh

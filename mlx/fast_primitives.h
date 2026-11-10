@@ -1,0 +1,918 @@
+// Copyright © 2024 Apple Inc.
+
+#include <optional>
+#include <variant>
+
+#include "mlx/backend/common/metal_kernel.h"
+#include "mlx/primitives.h"
+
+namespace mlx::core::fast {
+
+// Custom primitive accepts a fallback function which it uses for
+// transformations. Transformations are virtual so that derived classes may
+// override the default behavior.
+class Custom : public Primitive {
+ public:
+  explicit Custom(
+      Stream stream,
+      std::function<std::vector<array>(std::vector<array>)> fallback)
+      : Primitive(stream), fallback_(std::move(fallback)) {}
+
+  virtual std::pair<std::vector<array>, std::vector<int>> vmap(
+      const std::vector<array>& inputs,
+      const std::vector<int>& axes) override;
+
+  virtual std::vector<array> jvp(
+      const std::vector<array>& primals,
+      const std::vector<array>& tangents,
+      const std::vector<int>& argnums) override;
+
+  virtual std::vector<array> vjp(
+      const std::vector<array>& primals,
+      const std::vector<array>& cotangents,
+      const std::vector<int>& argnums,
+      const std::vector<array>& outputs) override;
+
+ protected:
+  std::function<std::vector<array>(std::vector<array>)> fallback_;
+};
+
+class RMSNorm : public Custom {
+ public:
+  RMSNorm(
+      Stream stream,
+      std::function<std::vector<array>(std::vector<array>)> fallback,
+      float eps)
+      : Custom(stream, std::move(fallback)), eps_(eps) {}
+
+  static bool use_fallback(Stream stream);
+
+  void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override {
+    throw std::runtime_error("NYI");
+  }
+  void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  std::vector<array> vjp(
+      const std::vector<array>& primals,
+      const std::vector<array>& cotangents,
+      const std::vector<int>& argnums,
+      const std::vector<array>& outputs) override;
+
+  DEFINE_NAME(RMSNorm)
+  bool is_equivalent(const Primitive& other) const override;
+  DEFINE_INPUT_OUTPUT_SHAPE()
+
+  auto state() const {
+    return std::make_pair(nullptr, eps_);
+  }
+
+ private:
+  float eps_;
+};
+
+// K2: fused residual-add + RMSNorm. Computes w * rmsnorm(x + residual) in one
+// kernel, replacing the (add, rms_norm) pair in the pre-norm decoder layers.
+class RMSNormResidual : public Custom {
+ public:
+  RMSNormResidual(
+      Stream stream,
+      std::function<std::vector<array>(std::vector<array>)> fallback,
+      float eps)
+      : Custom(stream, std::move(fallback)), eps_(eps) {}
+
+  static bool use_fallback(Stream stream);
+
+  void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override {
+    throw std::runtime_error("NYI");
+  }
+  void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  DEFINE_NAME(RMSNormResidual)
+  bool is_equivalent(const Primitive& other) const override;
+  DEFINE_INPUT_OUTPUT_SHAPE()
+
+  auto state() const {
+    return std::make_pair(nullptr, eps_);
+  }
+
+ private:
+  float eps_;
+};
+
+// K2: batched in-place KV append. Writes the new keys AND values into the
+// pre-allocated cache buffers at `offset` in a single kernel launch, replacing
+// the two per-tensor slice_update (Copy) ops of KVCache.update_and_fetch.
+class KVAppend : public Custom {
+ public:
+  KVAppend(
+      Stream stream,
+      std::function<std::vector<array>(std::vector<array>)> fallback,
+      int64_t offset)
+      : Custom(stream, std::move(fallback)), offset_(offset) {}
+
+  static bool use_fallback(Stream s);
+
+  void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override {
+    throw std::runtime_error("NYI");
+  }
+  void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  DEFINE_NAME(KVAppend)
+  bool is_equivalent(const Primitive& other) const override;
+  std::vector<Shape> output_shapes(const std::vector<array>& inputs) override {
+    return {inputs[2].shape(), inputs[3].shape()};
+  }
+
+  auto state() const {
+    return std::make_pair(nullptr, offset_);
+  }
+
+ private:
+  int64_t offset_;
+};
+
+class RMSNormVJP : public Custom {
+ public:
+  RMSNormVJP(
+      Stream stream,
+      std::function<std::vector<array>(std::vector<array>)> fallback,
+      float eps)
+      : Custom(stream, std::move(fallback)), eps_(eps) {}
+
+  void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override {
+    throw std::runtime_error("NYI");
+  }
+  void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  DEFINE_NAME(RMSNormVJP)
+  bool is_equivalent(const Primitive& other) const override;
+  auto state() const {
+    return std::make_pair(nullptr, eps_);
+  }
+
+ private:
+  float eps_;
+};
+
+// loss is always fp32 and the logits never have to be upcast in the graph.
+class CrossEntropy : public Custom {
+ public:
+  CrossEntropy(
+      Stream stream,
+      std::function<std::vector<array>(std::vector<array>)> fallback)
+      : Custom(stream, std::move(fallback)) {}
+
+  static bool use_fallback(Stream stream);
+
+  void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override {
+    throw std::runtime_error("NYI");
+  }
+  void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  std::vector<array> vjp(
+      const std::vector<array>& primals,
+      const std::vector<array>& cotangents,
+      const std::vector<int>& argnums,
+      const std::vector<array>& outputs) override;
+
+  DEFINE_NAME(CrossEntropy)
+  bool is_equivalent(const Primitive& other) const override {
+    return true;
+  }
+  std::vector<Shape> output_shapes(const std::vector<array>& inputs) override {
+    return {inputs[1].shape()};
+  }
+
+  auto state() const {
+    return std::monostate{};
+  }
+};
+
+class CrossEntropyVJP : public Custom {
+ public:
+  CrossEntropyVJP(
+      Stream stream,
+      std::function<std::vector<array>(std::vector<array>)> fallback)
+      : Custom(stream, std::move(fallback)) {}
+
+  void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override {
+    throw std::runtime_error("NYI");
+  }
+  void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  DEFINE_NAME(CrossEntropyVJP)
+  bool is_equivalent(const Primitive& other) const override {
+    return true;
+  }
+  DEFINE_INPUT_OUTPUT_SHAPE()
+
+  auto state() const {
+    return std::monostate{};
+  }
+};
+
+class LayerNorm : public Custom {
+ public:
+  LayerNorm(
+      Stream stream,
+      std::function<std::vector<array>(std::vector<array>)> fallback,
+      float eps)
+      : Custom(stream, std::move(fallback)), eps_(eps) {}
+
+  static bool use_fallback(Stream s);
+
+  void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override {
+    throw std::runtime_error("NYI");
+  }
+  void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  std::vector<array> vjp(
+      const std::vector<array>& primals,
+      const std::vector<array>& cotangents,
+      const std::vector<int>& argnums,
+      const std::vector<array>& outputs) override;
+
+  DEFINE_NAME(LayerNorm)
+  bool is_equivalent(const Primitive& other) const override;
+  DEFINE_INPUT_OUTPUT_SHAPE()
+  auto state() const {
+    return std::make_pair(nullptr, eps_);
+  }
+
+ private:
+  float eps_;
+};
+
+class LayerNormVJP : public Custom {
+ public:
+  LayerNormVJP(
+      Stream stream,
+      std::function<std::vector<array>(std::vector<array>)> fallback,
+      float eps)
+      : Custom(stream, std::move(fallback)), eps_(eps) {}
+
+  void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override {
+    throw std::runtime_error("NYI");
+  }
+  void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  DEFINE_NAME(LayerNormVJP)
+  bool is_equivalent(const Primitive& other) const override;
+  auto state() const {
+    return std::make_pair(nullptr, eps_);
+  }
+
+ private:
+  float eps_;
+};
+
+class RoPE : public Custom {
+ public:
+  RoPE(
+      Stream stream,
+      std::function<std::vector<array>(std::vector<array>)> fallback,
+      int dims,
+      bool traditional,
+      float base,
+      float scale,
+      bool forward)
+      : Custom(stream, std::move(fallback)),
+        dims_(dims),
+        traditional_(traditional),
+        base_(base),
+        scale_(scale),
+        forward_(forward) {}
+
+  static bool use_fallback(Stream s);
+
+  void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override {
+    throw std::runtime_error("NYI");
+  }
+  void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  std::vector<array> vjp(
+      const std::vector<array>& primals,
+      const std::vector<array>& cotangents,
+      const std::vector<int>& argnums,
+      const std::vector<array>& outputs) override;
+
+  DEFINE_NAME(RoPE)
+  bool is_equivalent(const Primitive& other) const override;
+  DEFINE_INPUT_OUTPUT_SHAPE()
+  auto state() const {
+    return std::make_tuple(
+        nullptr, dims_, traditional_, base_, scale_, forward_);
+  }
+
+ private:
+  int dims_;
+  bool traditional_;
+  float base_;
+  float scale_;
+  bool forward_;
+};
+
+class ScaledDotProductAttention : public Custom {
+ public:
+  ScaledDotProductAttention(
+      Stream stream,
+      std::function<std::vector<array>(std::vector<array>)> fallback,
+      float scale,
+      bool do_causal,
+      bool has_sinks,
+      bool output_logsumexp,
+      bool force_fused)
+      : Custom(stream, std::move(fallback)),
+        scale_(scale),
+        do_causal_(do_causal),
+        has_sinks_(has_sinks),
+        output_logsumexp_(output_logsumexp),
+        force_fused_(force_fused) {}
+
+  static bool use_fallback(
+      const array& q,
+      const array& k,
+      const array& v,
+      bool has_mask,
+      bool has_arr_mask,
+      bool do_causal,
+      bool is_training,
+      bool output_logsumexp,
+      bool force_fused,
+      Stream s);
+  static bool supports_bool_mask();
+
+  void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override {
+    throw std::runtime_error("NYI");
+  }
+
+  void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  std::vector<array> vjp(
+      const std::vector<array>& primals,
+      const std::vector<array>& cotangents,
+      const std::vector<int>& argnums,
+      const std::vector<array>& outputs) override;
+
+  bool is_equivalent(const Primitive& other) const override;
+
+  DEFINE_NAME(ScaledDotProductAttention);
+  DEFINE_INPUT_OUTPUT_SHAPE()
+  auto state() const {
+    return std::make_tuple(
+        nullptr,
+        scale_,
+        do_causal_,
+        has_sinks_,
+        output_logsumexp_,
+        force_fused_);
+  }
+
+ private:
+  float scale_;
+  bool do_causal_;
+  bool has_sinks_;
+  bool output_logsumexp_;
+  bool force_fused_;
+};
+
+class ScaledDotProductAttentionVJP : public Custom {
+ public:
+  ScaledDotProductAttentionVJP(
+      Stream stream,
+      std::function<std::vector<array>(std::vector<array>)> fallback,
+      float scale,
+      bool do_causal,
+      bool has_sinks)
+      : Custom(stream, std::move(fallback)),
+        scale_(scale),
+        do_causal_(do_causal),
+        has_sinks_(has_sinks) {}
+
+  static bool use_fallback(const array& q, Stream s);
+
+  void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override {
+    throw std::runtime_error("NYI");
+  }
+
+  void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  DEFINE_NAME(ScaledDotProductAttentionVJP);
+  bool is_equivalent(const Primitive& other) const override;
+  auto state() const {
+    return std::make_tuple(nullptr, scale_, do_causal_, has_sinks_);
+  }
+
+ private:
+  float scale_;
+  bool do_causal_;
+  bool has_sinks_;
+};
+
+class ConvertFP8 : public Primitive {
+ public:
+  explicit ConvertFP8(Stream stream, bool to_fp8)
+      : Primitive(stream), to_fp8_(to_fp8) {}
+
+  void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  const char* name() const override {
+    if (to_fp8_) {
+      return "ToFP8";
+    } else {
+      return "FromFP8";
+    }
+  }
+  bool state() const {
+    return to_fp8_;
+  };
+
+  bool is_equivalent(const Primitive& other) const override;
+  DEFINE_INPUT_OUTPUT_SHAPE();
+
+ private:
+  bool to_fp8_;
+};
+
+class GatedDeltaUpdate : public Custom {
+ public:
+  GatedDeltaUpdate(
+      Stream stream,
+      std::function<std::vector<array>(std::vector<array>)> fallback)
+      : Custom(stream, std::move(fallback)) {}
+
+  static bool use_fallback(
+      const int Hk,
+      const int Dk,
+      const int Hv,
+      const int Dv,
+      const bool has_mask,
+      Stream s);
+
+  void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override {
+    throw std::runtime_error("NYI");
+  }
+
+  void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  DEFINE_NAME(GatedDeltaUpdate);
+  DEFINE_INPUT_OUTPUT_SHAPE()
+  auto state() const {
+    return std::make_tuple(nullptr); /* TODO */
+  }
+
+ private:
+};
+
+class GdnFusedStep : public Custom {
+ public:
+  GdnFusedStep(
+      Stream stream,
+      std::function<std::vector<array>(std::vector<array>)> fallback,
+      float inv_scale,
+      float eps,
+      float norm_eps)
+      : Custom(stream, std::move(fallback)),
+        inv_scale_(inv_scale),
+        eps_(eps),
+        norm_eps_(norm_eps) {}
+
+  static bool use_fallback(
+      int B,
+      int T,
+      int Dk,
+      int Dv,
+      int Hv,
+      int Hk,
+      int kernel_size,
+      Stream s);
+
+  DEFINE_DEFAULT_IS_EQUIVALENT()
+
+  std::vector<Shape> output_shapes(const std::vector<array>& inputs) override {
+    return {inputs[9].shape(), inputs[10].shape()};  // z, state
+  }
+
+  void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override {
+    throw std::runtime_error("NYI");
+  }
+
+  void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  DEFINE_NAME(GdnFusedStep);
+
+ private:
+  float inv_scale_;
+  float eps_;
+  float norm_eps_;
+};
+class GdnFusedStepTape : public Custom {
+ public:
+  GdnFusedStepTape(
+      Stream stream,
+      std::function<std::vector<array>(std::vector<array>)> fallback,
+      float inv_scale,
+      float eps,
+      float norm_eps)
+      : Custom(stream, std::move(fallback)),
+        inv_scale_(inv_scale),
+        eps_(eps),
+        norm_eps_(norm_eps) {}
+
+  static bool use_fallback(
+      int B,
+      int T,
+      int Dk,
+      int Dv,
+      int Hv,
+      int Hk,
+      int kernel_size,
+      Stream s);
+
+  DEFINE_DEFAULT_IS_EQUIVALENT()
+
+  std::vector<Shape> output_shapes(const std::vector<array>& inputs) override {
+    int T = (int)inputs[9].shape(1);
+    int Hv = (int)inputs[9].shape(2);
+    int key_dim = (int)inputs[0].shape(2);
+    int value_dim = (int)inputs[2].shape(2);
+    int conv_dim = 2 * key_dim + value_dim;
+    return {inputs[9].shape(),
+            inputs[10].shape(),
+            {T, Hv, 128, 128},
+            {T, 3, conv_dim}};
+  }
+
+  void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override {
+    throw std::runtime_error("NYI");
+  }
+
+  void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  DEFINE_NAME(GdnFusedStepTape);
+
+ private:
+  float inv_scale_;
+  float eps_;
+  float norm_eps_;
+};
+
+// GdnFusedStepSlot: Phase B (the re-forward remover). The same fused verify
+// step as GdnFusedStepTape, but the per-row snapshot outputs cover only the
+// COMMIT ROWS 0..T-2 (row T-1 is state_new): state_slot [T-1, Hv, 128, 128]
+// f32 + conv_slot [T-1, 3, conv_dim] bf16, row-indexed like the tape (row t =
+// the state/conv-window AFTER row t, so a reject at accepted prefix krow
+// rebinds to slot row krow - the bench commit() code is unchanged). Row 0
+// (the state after the trunk row) is included: in our spec flow the trunk is
+// row 0 of the verify batch, so '0 drafts accepted' needs the post-row-0
+// state, unlike the llama draft-only batch (where slot 0 = pre-verify).
+// Gated by MLX_ROCM_GDN_SLOT=1 (DEFAULT OFF); T >= 2 (a T=1 step has no
+// commit rows). The tape op is untouched (it passes n_slots = TMAX).
+class GdnFusedStepSlot : public Custom {
+ public:
+  GdnFusedStepSlot(
+      Stream stream,
+      std::function<std::vector<array>(std::vector<array>)> fallback,
+      float inv_scale,
+      float eps,
+      float norm_eps)
+      : Custom(stream, std::move(fallback)),
+        inv_scale_(inv_scale),
+        eps_(eps),
+        norm_eps_(norm_eps) {}
+
+  static bool use_fallback(
+      int B,
+      int T,
+      int Dk,
+      int Dv,
+      int Hv,
+      int Hk,
+      int kernel_size,
+      Stream s);
+
+  DEFINE_DEFAULT_IS_EQUIVALENT()
+
+  std::vector<Shape> output_shapes(const std::vector<array>& inputs) override {
+    int T = (int)inputs[9].shape(1);
+    int Hv = (int)inputs[9].shape(2);
+    int key_dim = (int)inputs[0].shape(2);
+    int value_dim = (int)inputs[2].shape(2);
+    int conv_dim = 2 * key_dim + value_dim;
+    return {inputs[9].shape(),
+            inputs[10].shape(),
+            {T - 1, Hv, 128, 128},
+            {T - 1, 3, conv_dim}};
+  }
+
+  void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override {
+    throw std::runtime_error("NYI");
+  }
+
+  void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  DEFINE_NAME(GdnFusedStepSlot);
+
+ private:
+  float inv_scale_;
+  float eps_;
+  float norm_eps_;
+};
+// LMHeadInt2: int2 g128-asymmetric dequant GEMV (M=1) + in-kernel per-64-column top-8 candidate emission (see backend/rocm/lm_head_int2.hip). Inputs: x [M, K] bf16, wq [N, K/4] u8, scale [N, NG] f32 (per-group s), zs [N, NG] f32 (z*s), sx [NG] f32 (sum of x per 128-group). Outputs: logits [N] f32, cand_val [N/64, 8] f32, cand_col [N/64, 8] i32.
+class LMHeadInt2 : public Custom {
+ public:
+  LMHeadInt2(
+      Stream stream,
+      std::function<std::vector<array>(std::vector<array>)> fallback)
+      : Custom(stream, std::move(fallback)) {}
+
+  static bool use_fallback(Stream s);
+
+  void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override {
+    throw std::runtime_error("NYI");
+  }
+  void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  DEFINE_NAME(LMHeadInt2);
+
+  std::vector<Shape> output_shapes(const std::vector<array>& inputs) override {
+    int N = (int)inputs[1].shape(0);
+    int NG = (int)inputs[4].shape(0);
+    (void)NG;
+    return {Shape{N}, Shape{N / 64, 8}, Shape{N / 64, 8}};
+  }
+};
+// LMHeadInt2W: vectorized (wave-wide) int2 g128-asymmetric dequant GEMV (M=1) - the R4c scalar port's vectorized follow-up (see backend/rocm/lm_head_int2w.hip). Same inputs/contract as LMHeadInt2; candidate arrays are [N/32, 8] (per-32-column top-8, refining the scalar's per-64) with shape guards N%32 + K%512.
+class LMHeadInt2W : public Custom {
+ public:
+  LMHeadInt2W(
+      Stream stream,
+      std::function<std::vector<array>(std::vector<array>)> fallback)
+      : Custom(stream, std::move(fallback)) {}
+
+  static bool use_fallback(Stream s);
+
+  void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override {
+    throw std::runtime_error("NYI");
+  }
+  void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  DEFINE_NAME(LMHeadInt2W);
+
+  std::vector<Shape> output_shapes(const std::vector<array>& inputs) override {
+    int N = (int)inputs[1].shape(0);
+    int NG = (int)inputs[4].shape(0);
+    (void)NG;
+    return {Shape{N}, Shape{N / 32, 8}, Shape{N / 32, 8}};
+  }
+};
+class GdnPrep : public Custom {
+ public:
+  GdnPrep(
+      Stream stream,
+      std::function<std::vector<array>(std::vector<array>)> fallback,
+      int key_dim,
+      int value_dim,
+      int conv_dim,
+      int kernel_size,
+      float inv_scale,
+      float eps)
+      : Custom(stream, std::move(fallback)),
+        key_dim_(key_dim),
+        value_dim_(value_dim),
+        conv_dim_(conv_dim),
+        kernel_size_(kernel_size),
+        inv_scale_(inv_scale),
+        eps_(eps) {}
+
+  DEFINE_DEFAULT_IS_EQUIVALENT()
+
+  std::vector<Shape> output_shapes(const std::vector<array>& inputs) override {
+    return {
+        inputs[0].shape(),  // q_normed
+        inputs[1].shape(),  // k_normed
+        inputs[2].shape(),  // v_conv
+        inputs[3].shape(),  // beta
+        inputs[4].shape()   // g
+    };
+  }
+
+  void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override {
+    throw std::runtime_error("NYI");
+  }
+
+  void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  DEFINE_NAME(GdnPrep);
+
+ private:
+  int key_dim_;
+  int value_dim_;
+  int conv_dim_;
+  int kernel_size_;
+  float inv_scale_;
+  float eps_;
+};
+
+class GdnNormGated : public Custom {
+ public:
+  GdnNormGated(
+      Stream stream,
+      std::function<std::vector<array>(std::vector<array>)> fallback,
+      float eps)
+      : Custom(stream, std::move(fallback)),
+        eps_(eps) {}
+
+  DEFINE_DEFAULT_IS_EQUIVALENT()
+
+  std::vector<Shape> output_shapes(const std::vector<array>& inputs) override {
+    return {inputs[0].shape()};
+  }
+
+  void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override {
+    throw std::runtime_error("NYI");
+  }
+
+  void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  DEFINE_NAME(GdnNormGated);
+
+ private:
+  float eps_;
+};
+
+
+class Quantize : public Custom {
+ public:
+  explicit Quantize(
+      Stream stream,
+      std::function<std::vector<array>(std::vector<array>)> fallback,
+      int group_size,
+      int bits,
+      QuantizationMode mode,
+      bool dequantize)
+      : Custom(stream, std::move(fallback)),
+        group_size_(group_size),
+        bits_(bits),
+        mode_(mode),
+        dequantize_(dequantize) {}
+
+  void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  DEFINE_NAME(Quantize);
+
+  bool is_equivalent(const Primitive& other) const override;
+  std::vector<Shape> output_shapes(const std::vector<array>& inputs) override;
+  auto state() const {
+    return std::make_tuple(nullptr, group_size_, bits_, mode_, dequantize_);
+  }
+
+ private:
+  int group_size_;
+  int bits_;
+  QuantizationMode mode_;
+  bool dequantize_;
+};
+
+class KQuantDequantize : public Custom {
+ public:
+  explicit KQuantDequantize(
+      Stream stream,
+      std::function<std::vector<array>(std::vector<array>)> fallback,
+      int ktype)
+      : Custom(stream, std::move(fallback)), ktype_(ktype) {}
+
+  void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override {
+    throw std::runtime_error("KQuantDequantize only runs on GPU.");
+  }
+
+  void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  DEFINE_NAME(KQuantDequantize);
+  bool is_equivalent(const Primitive& other) const override;
+  std::vector<Shape> output_shapes(const std::vector<array>& inputs) override;
+  auto state() const { return std::make_tuple(nullptr, ktype_); }
+
+ private:
+  int ktype_;
+};
+
+using ScalarArg = std::variant<bool, int, float>;
+
+class CustomKernel : public Primitive {
+ public:
+  CustomKernel(
+      Stream stream,
+      std::string name,
+      std::string source,
+      std::tuple<int, int, int> grid,
+      std::tuple<int, int, int> threadgroup,
+      std::vector<std::tuple<bool, bool, bool>> shape_infos,
+      bool ensure_row_contiguous,
+      std::optional<float> init_value,
+      std::vector<ScalarArg> scalar_arguments,
+      bool is_precompiled,
+      int shared_memory,
+      CompileOptions::Data compile_options = {})
+      : Primitive(stream),
+        name_(std::move(name)),
+        source_(std::move(source)),
+        grid_(grid),
+        threadgroup_(threadgroup),
+        shape_infos_(std::move(shape_infos)),
+        ensure_row_contiguous_(ensure_row_contiguous),
+        init_value_(init_value),
+        scalar_arguments_(std::move(scalar_arguments)),
+        is_precompiled_(is_precompiled),
+        shared_memory_(shared_memory),
+        compile_options_(compile_options) {}
+
+  void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override {
+    throw std::runtime_error("Custom kernels only run on GPU.");
+  }
+
+  void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  DEFINE_NAME(CustomKernel);
+  auto state() const {
+    return std::make_tuple(
+        name_,
+        source_,
+        grid_,
+        threadgroup_,
+        shape_infos_,
+        ensure_row_contiguous_,
+        init_value_,
+        scalar_arguments_,
+        is_precompiled_,
+        shared_memory_,
+        compile_options_);
+  }
+
+ private:
+  std::string name_;
+  std::string source_;
+  std::tuple<int, int, int> grid_;
+  std::tuple<int, int, int> threadgroup_;
+  std::vector<std::tuple<bool, bool, bool>> shape_infos_;
+  bool ensure_row_contiguous_;
+  std::optional<float> init_value_;
+  std::vector<ScalarArg> scalar_arguments_;
+  bool is_precompiled_;
+  int shared_memory_;
+  CompileOptions::Data compile_options_;
+};
+
+
+
+} // namespace mlx::core::fast

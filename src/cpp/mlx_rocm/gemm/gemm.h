@@ -4,7 +4,8 @@
  * Provenance: written for the mlx-rocm MVP skeleton (ticket 405), modeled on
  * the persistent-handle + heuristic-cache design of
  * vendor/mlx-rocm-upstream/mlx/backend/rocm/gemms/hipblaslt_gemm.cpp
- * (the vendor ref @ rocm-current; forward-merge of the ROCm base).
+ * (maternion/mlx @ rocm-current, 9ce3117ecd; forward-merge of ml-explore/mlx
+ * PR #2300 head NripeshN/mlx:rocm-support).
  *
  * Conventions:
  *   - All GEMMs are row-major:  D[m,n] = A[m,k] * B[k,n]

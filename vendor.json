@@ -1,10 +1,15 @@
 {
-  "note": "Pinned vendor source for the ROCm backend. ROCm 10.1 is the only verified toolchain (userland, core at /opt/rocm/core-10.1); 6.4 (early probe) and 7.7 (original target) are historical.",
+  "note": "Pinned vendor source for the ROCm backend. primary = adopted base; fallback = the upstream PR head if primary does not build clean on ROCm 10.1 (docs/plan.md, open question 1). ROCm 10.1 is the only verified toolchain (guest userland, core at /opt/rocm/core-10.1); 6.4 (early probe) and 7.7 (original target) are historical.",
   "primary": {
-    "fork": "https://github.com/marzukia/mlx-rocm",
-    "ref": "main",
-    "sha": "75ca881",
-    "comment": "The committed vendor/mlx-rocm-upstream/ tree is the authoritative source (byte-verified vs the sha). GDN tail fusion + graph-decode diagnostics on the decode path; launcher pointer fix (host Data* -> gpu_ptr<T>) for the deterministic HSA memory fault. Gates G1/G2 pass (maxdiff 0.0). See docs/quickstart.md."
+    "fork": "https://github.com/maternion/mlx",
+    "ref": "rocm-current",
+    "sha": "9ce3117ecd",
+    "comment": "ADOPTED (MVP, 2026-10-25): vendored at vendor/mlx-rocm-upstream/ (byte-verified vs this sha). Newer forward-merge: GatedDeltaUpdate fallback + mxfp8 prefill GEMM + gfx1200/RDNA4 fixes. Validated on the neon gfx1201 guest (ROCm 10.1 userland — the only verified toolchain; the 6.4 probe and 7.7 target are historical): bf16 GEMM PASS (0.0078), fp8 probe PASS (0.0057, e4m3 reference fixed in the MVP)."
+  },
+  "fallback": {
+    "fork": "https://github.com/NripeshN/mlx",
+    "ref": "rocm-support",
+    "comment": "Head of upstream ml-explore/mlx PR #2300 [Experiment] ROCm backend. TheRock 7.13-tested."
   },
   "build": {
     "hip_architectures": "gfx1201",
