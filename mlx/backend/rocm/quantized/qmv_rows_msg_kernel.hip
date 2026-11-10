@@ -56,8 +56,16 @@
 // decode) and M = 5..8 keep the per-row qmv_wide path.
 namespace mlx::core::rocm {
 
-template <typename T, typename ScaleT, int GROUP_SIZE, int BITS>
-__global__ void __launch_bounds__(192)
+// F3-M4X (VARIANT B, block split, per RCA-r1 section 3.8 candidate):
+// WARPS_T = workgroup wave count (6 = the 192-thread / 24-col block of
+// record; 3 = the 96-thread / 12-col split, launched at M = 4 under
+// MLX_ROCM_M4PREF to relieve the 16-accumulator register-pressure /
+// scheduler candidate at the lm_head shape). Per-wave math is
+// unchanged (each wave owns BN = 4 columns and all M rows; per-row FMA
+// order unchanged), so the row-exact contract is preserved.
+template <typename T, typename ScaleT, int GROUP_SIZE, int BITS,
+          int WARPS_T = 6>
+__global__ void __launch_bounds__(WARPS_T * 32)
 qmv_rows_msg_kernel(
     const T* __restrict__ x,           // [M, K]
     const uint8_t* __restrict__ w,     // [N, K*BITS/8] packed
@@ -70,7 +78,7 @@ qmv_rows_msg_kernel(
     bool has_bias) {
   constexpr int MAXM = 4;
   constexpr int BN = 4;
-  constexpr int WARPS = 6;
+  constexpr int WARPS = WARPS_T;
   constexpr int WPER = 128 / BITS;   // 32 (4-bit) / 16 (8-bit)
   constexpr int V = 32 / BITS;       // values per 32-bit word (8 / 4)
   constexpr int NVEC = WPER / 8;     // 16B loads per row k-tile (4 / 2)
@@ -116,12 +124,18 @@ qmv_rows_msg_kernel(
           xn[j] = static_cast<float>(px[j]);
       }
       // Per-row x-chunk sum: the qmv_wide_kernel lx chain (q-major,
-      // j-minor, same values). Accumulated unconditionally; when !has_bias
-      // the consumer multiplies by b == 0.0f (bit-identical, see header).
+      // j-minor, same values). F3-M4X audit fix: accumulated ONLY when
+      // has_bias, mirroring the per-row kernel verbatim — the per-row
+      // kernel never accumulates lx when !has_bias, and 0.0f * a
+      // non-finite x sum is NaN while the per-row 0.0f * 0.0f is +0.0f
+      // (the one source-level row inexactness found in the audit;
+      // bit-identical to the previous code for all finite inputs).
       float lx = 0.0f;
+      if (has_bias) {
 #pragma unroll
-      for (int j = 0; j < WPER; ++j)
-        lx += xn[j];
+        for (int j = 0; j < WPER; ++j)
+          lx += xn[j];
+      }
       for (int c = 0; c < BN; ++c) {
         const int col = col0 + c;
         if (col >= N)
@@ -280,9 +294,11 @@ qmv_rows_msg_hoist_kernel(
             xn[j] = static_cast<float>(px[j]);
         }
         float lx = 0.0f;
+        if (has_bias) {
 #pragma unroll
-        for (int j = 0; j < WPER; ++j)
-          lx += xn[j];
+          for (int j = 0; j < WPER; ++j)
+            lx += xn[j];
+        }
         float la = 0.0f;
 #pragma unroll
         for (int j = 0; j < WPER; ++j)

@@ -21,6 +21,7 @@ __device__ inline float load_scale_value(ScaleT raw);
 #include "mlx/backend/rocm/quantized/qmv_wide_mr_kernel.hip"
 #include "mlx/backend/rocm/quantized/qmv_rows_msg_kernel.hip"
 #include "mlx/backend/rocm/quantized/qmv_wide_mr3_kernel.hip"
+#include "mlx/backend/rocm/quantized/qmv_wide_mr3_pref_kernel.hip"
 #include "mlx/primitives.h"
 
 #include <hip/hip_bfloat16.h>
@@ -4158,15 +4159,38 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
           (std::getenv("MLX_ROCM_QMV_ROWS_HOIST") != nullptr);
       static int rows_min_n_env =
           parse_non_negative_int_env("MLX_ROCM_QMV_ROWS_MIN_N", 0);
+      // F3-M4X (120+ lane, per RCA-r3 section 6.1 + RCA-r1 section 3.8):
+      // two pre-registered M=4 variants, both DEFAULT OFF (zero behavior
+      // change when unset; the K=2 / M=3 record path is untouched).
+      // VARIANT A (MLX_ROCM_M4ROWEXACT): at M = 4 (the K = 3 verify
+      // lm_head shape) skip the unproven rows_msg and fall through to
+      // the proven row-exact shared-decode record kernel (qmv_wide_mr3,
+      // 4-bit; 8-bit falls to the per-row wide / mr2 path). Structural
+      // bit-exactness: the per-row FMA order is the verbatim qmv_wide
+      // traversal (audit: rows_msg per-row math is already a verbatim
+      // transcription for all rows — no row 2/3-specific path; the
+      // audit found one lx 0.0f*Inf edge, fixed in-kernel).
+      // VARIANT B (MLX_ROCM_M4PREF): (a) the mr3 M = 4 arm runs the
+      // x-load-prefetch kernel (software-pipelined 16B x-tile double
+      // buffer across the k-loop; FMA order unchanged, bf16 x); (b)
+      // rows_msg at M = 4 launches the 3-wave (96-thread / 12-col)
+      // block split to relieve the 16-accumulator register-pressure /
+      // scheduler candidate (per-wave math unchanged).
+      static bool m4rexact =
+          (std::getenv("MLX_ROCM_M4ROWEXACT") != nullptr);
+      static bool m4pref =
+          (std::getenv("MLX_ROCM_M4PREF") != nullptr);
       int rows_min_n = (rows_min_n_env > 0) ? rows_min_n_env : 16384;
       bool rows_ok = use_rows_qmv && (M >= 2) && (M <= 4) &&
           (N >= rows_min_n) && (K % 32 == 0);
-      if (rows_ok) {
-        dim3 rblock(32 * 6);
-        dim3 rgrid((N + 23) / 24, 1);
+      if (rows_ok && !(m4rexact && M == 4)) {
+        // F3-M4X B(b): block split at M = 4 (3 waves / 12 cols vs 6 / 24).
+        const int rw = (m4pref && M == 4 && !use_hoist) ? 3 : 6;
+        dim3 rblock(32 * rw);
+        dim3 rgrid((N + rw * 4 - 1) / (rw * 4), 1);
 #define LAUNCH_QMV_ROWS_MSG(TT, ST, GS, BV)                              \
   enc.add_kernel_node(                                                  \
-      &rocm::qmv_rows_msg_kernel<TT, ST, GS, BV>, rgrid, rblock, 0u,   \
+      (rw == 3) ? &rocm::qmv_rows_msg_kernel<TT, ST, GS, BV, 3> : &rocm::qmv_rows_msg_kernel<TT, ST, GS, BV, 6>, rgrid, rblock, 0u,   \
       (const TT*)x_ptr, w_ptr, (const ST*)scales_ptr,                 \
       (const ST*)biases_ptr, (TT*)out_ptr, M, N, K, has_bias)
 #define LAUNCH_QMV_ROWS_MSG_H(TT, ST, GS, BV)                              \
@@ -4210,7 +4234,8 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
           (x.dtype() != float32);
       bool mr2_ok = use_mr_qmv && mr2_f32_ok && (bits_ == 4) && (M >= 2) &&
           (M <= 4) && (K % 1024 == 0) && ((K / 4) % 32 == 0) &&
-          (N >= mr2_min_n) && (mr2_lds + 1024 <= 65536);
+          (N >= mr2_min_n) && (mr2_lds + 1024 <= 65536) &&
+          !(m4rexact && M == 4);
       if (mr2_ok) {
         dim3 mr2block(32, 16);
         dim3 mr2grid((N + 15) / 16, (M + 3) / 4);
@@ -4233,7 +4258,7 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
       }
       // M>=2: the multi-row kernel batches up to 4 rows per block to share one weight-tile read. At M=1 (eager decode) three of the four rows are padding: no bandwidth win, plus LDS staging + sync overhead. Measured on gfx1201 bare metal 2026-11-01: M=1 AR 77.39 tok/s with MR on vs 80.94 with MLX_QMV_NO_MR=1 (-4.5% eager tax). The multi-row win is real at M=2..4 (MTP verify / batch decode), where the shared weight read is fully utilized, so gate on M instead of defaulting off.
       bool mr_ok = use_mr_qmv && (M <= 4) && (M >= 2) && (mr_lds <= 32768) &&
-          (N >= mr2_min_n);  // t1251: small-N per-row wins (lab 2026-11-01)
+          (N >= mr2_min_n) && !(m4rexact && M == 4);  // t1251 + F3-M4X A
       // run-852: the MR kernel's in-k-loop __syncthreads (LX hoist) requires
       // uniform k-iteration counts across lanes: K % (32 * WPER) == 0
       // (K % 1024 == 0 for 4-bit, K % 512 == 0 for 8-bit). Shapes that do
@@ -4266,6 +4291,25 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
         if (m3ok) {
           dim3 m3block(32, 16);
           dim3 m3grid((N + 15) / 16, (M + 3) / 4);
+          // F3-M4X B(a): M = 4 x-load prefetch kernel (bf16 only — the
+          // double buffer is 16 uint4 = 64 VGPR per buffer).
+          if (m4pref && M == 4 && x.dtype() == bfloat16) {
+#define LAUNCH_QMV_WIDE_MR3P(TT, ST, GS)                              \
+  enc.add_kernel_node(                                                \
+      &rocm::qmv_wide_mr3_pref_kernel<TT, ST, GS>, m3grid, m3block, 0u, \
+      (const TT*)x_ptr, w_ptr, (const ST*)scales_ptr,             \
+      (const ST*)biases_ptr, (TT*)out_ptr, M, N, K, has_bias)
+#define LAUNCH_QMV_WIDE_MR3P_GS(TT, ST)                             \
+  do {                                                                  \
+    if (group_size_ == 32) { LAUNCH_QMV_WIDE_MR3P(TT, ST, 32); }   \
+    else if (group_size_ == 64) { LAUNCH_QMV_WIDE_MR3P(TT, ST, 64); } \
+    else { LAUNCH_QMV_WIDE_MR3P(TT, ST, 128); }                      \
+  } while (0)
+            LAUNCH_QMV_WIDE_MR3P_GS(hip_bfloat16, hip_bfloat16);
+#undef LAUNCH_QMV_WIDE_MR3P_GS
+#undef LAUNCH_QMV_WIDE_MR3P
+            return;
+          }
 #define LAUNCH_QMV_WIDE_MR3(TT, ST, GS)                                 \
   enc.add_kernel_node(                                                \
       &rocm::qmv_wide_mr3_kernel<TT, ST, GS>, m3grid, m3block, 0u,   \
