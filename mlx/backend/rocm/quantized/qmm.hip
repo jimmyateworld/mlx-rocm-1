@@ -22,6 +22,7 @@ __device__ inline float load_scale_value(ScaleT raw);
 #include "mlx/backend/rocm/quantized/qmv_rows_msg_kernel.hip"
 #include "mlx/backend/rocm/quantized/qmv_wide_mr3_kernel.hip"
 #include "mlx/backend/rocm/quantized/qmv_wide_mr3_pref_kernel.hip"
+#include "mlx/backend/rocm/quantized/qmv_rf_kernel.hip"
 #include "mlx/primitives.h"
 
 #include <hip/hip_bfloat16.h>
@@ -4180,6 +4181,49 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
           (std::getenv("MLX_ROCM_M4ROWEXACT") != nullptr);
       static bool m4pref =
           (std::getenv("MLX_ROCM_M4PREF") != nullptr);
+      // K3(i) 2026-11-11: uniform small-M row-fused 4-bit QMV (M = 1..4,
+      // all N) — the wave-1 (e5ef5b7) pattern: LDS x staging +
+      // broadcast reads, the weight tile decoded ONCE per (col, k-tile)
+      // and broadcast-MAC'd against all M rows, in-register RNE output,
+      // 1 barrier per k-slice. DEFAULT OFF (OPT-IN MLX_QMV_RF=1): the
+      // standalone shape table (gate C, 2026-11-11) measured it ~45%
+      // SLOWER than the existing defaults (x <= 96 KB is L1/L2-resident
+      // already, so the LDS round-trip + barrier cost more than the
+      // redundant dequant they remove; the 512-thread 16-wave block is
+      // 4x the rows_msg 192-thread 6-wave thread count) and the M4/M3
+      // ratio did not drop (2.61 vs 1.29 at N = 248320). It is bit-
+      // identical to the base defaults (gate B: 0 flips vs 02c4a6ca, all
+      // 21 GEMMs) and token-identical on the K2REG 1024 record (gate A),
+      // so it ships for A/B via MLX_QMV_RF=1; MLX_QMV_NO_RF=1 forces the
+      // old ladder when RF is on. The F3 M4ROWEXACT / M4PREF record paths
+      // (M = 4) run verbatim first in every configuration.
+      static bool qmm_rf_on = (std::getenv("MLX_QMV_RF") != nullptr);
+      if (qmm_rf_on && bits_ == 4 && M <= 4 && K % 1024 == 0 &&
+          !((m4rexact || m4pref) && M == 4)) {
+        dim3 rf_grid((N + 15) / 16, (M + 3) / 4);
+        dim3 rf_block(32, 16);
+#define LAUNCH_RF(TT, ST, GS)                                   \
+        enc.add_kernel_node(                                   \
+            &rocm::qmv_rf_kernel<TT, ST, GS>, rf_grid, rf_block, 0u, \
+            (const TT*)x_ptr, w_ptr, (const ST*)scales_ptr,    \
+            (const ST*)biases_ptr, (TT*)out_ptr, M, N, K, has_bias)
+#define LAUNCH_RF_GS(TT, ST)                                   \
+        do {                                                       \
+          if (group_size_ == 32) { LAUNCH_RF(TT, ST, 32); }        \
+          else if (group_size_ == 64) { LAUNCH_RF(TT, ST, 64); }   \
+          else { LAUNCH_RF(TT, ST, 128); }                        \
+        } while (0)
+        if (x.dtype() == bfloat16) {
+          LAUNCH_RF_GS(hip_bfloat16, hip_bfloat16);
+        } else if (x.dtype() == float16) {
+          LAUNCH_RF_GS(__half, __half);
+        } else {
+          LAUNCH_RF_GS(float, float);
+        }
+#undef LAUNCH_RF_GS
+#undef LAUNCH_RF
+        return;
+      }
       int rows_min_n = (rows_min_n_env > 0) ? rows_min_n_env : 16384;
       bool rows_ok = use_rows_qmv && (M >= 2) && (M <= 4) &&
           (N >= rows_min_n) && (K % 32 == 0);
